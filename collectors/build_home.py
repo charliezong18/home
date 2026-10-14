@@ -43,6 +43,28 @@ def load_readings():
     return sorted(out, key=lambda x: x.get("ts", x.get("added", "")), reverse=True)
 
 
+def edit_counts():
+    """edits.jsonl（编辑流账本，同 id 后者生效）→ {target: {"pending": 未落卡, "hermes": 附言待 Hermes}}。坏行跳过。"""
+    latest = {}
+    try:
+        with open(os.path.join(DATA_DIR, "edits.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(e, dict) and e.get("id"):
+                    latest[e["id"]] = {**latest.get(e["id"], {}), **e}
+    except OSError:
+        return {}
+    out = {}
+    for e in latest.values():
+        key = {"pending": "pending", "needs_hermes": "hermes"}.get(e.get("state"))
+        if key and e.get("target"):
+            out.setdefault(e["target"], {"pending": 0, "hermes": 0})[key] += 1
+    return out
+
+
 def normalized(home, status):
     h = json.loads(json.dumps(home))
     h.pop("generated", None)
@@ -82,6 +104,11 @@ def main():
             }
         m = (snaps.get("menxia") or {}).get("data") or {}
         d = (snaps.get("dashboard") or {}).get("data") or {}
+        ec = edit_counts()
+        for p in d.get("cards", []):
+            c = ec.get(p.get("id"), {})
+            p["pending_edits"] = c.get("pending", 0)
+            p["hermes_edits"] = c.get("hermes", 0)
         home = {
             "schema": SCHEMA,
             "generated": now_iso(),
