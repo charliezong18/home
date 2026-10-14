@@ -13,6 +13,12 @@ const CAP = { due: 6, proj: 6, lib: 5, links: 3 };
 const FOLDER_GROUPS = [['你拍', '待你拍', 5], ['你读', '待你读', 3], ['agent', '等 agent', 2]];
 const DUE_DAYS = 14;        // 到期栏窗口；过期超过 14 天的项目卡 deadline 视为卡片没更新，不上栏
 const LEAD_DAYS = 30;       // 头条候选的截止窗口
+// 编辑流：弹窗「保存」= 往 home-data 的 edits.jsonl 追加一行；Mac mini 每 5 分钟落进 vault 卡（collectors/apply_edits.py）
+const EDITS_PATH = '/repos/charliezong18/review/contents/edits.jsonl';
+const TIER = { now: 'now', build: 'build', learn: 'learn', ice: 'ice' };
+const STATUS = { active: '推进中', waiting: '等别人', you: '卡在你', ice: '冷冻', done: '完成' };
+let lastData = null;
+const localEdits = [];      // 已保存、home.json 还没反映的编辑；重新读取时叠回去，免得乐观更新被旧数据冲掉
 
 const $ = (id) => document.getElementById(id);
 const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } };
@@ -92,6 +98,8 @@ async function load() {
   try { data = await res.json(); } catch { return setStatus('home.json 不是合法 JSON', true); }
   $('auth').hidden = true;
   $('grid').hidden = false;
+  overlayEdits(data);
+  lastData = data;
   render(data);
   setStatus('');
 }
@@ -269,8 +277,8 @@ function render(data) {
     const dust = p.dusty ? daysSince(p.updated) : NaN;
     return h('div', { class: `proj${p.dusty ? ' dust' : ''}` },
       h('div', { class: 'n' },
-        h('button', { type: 'button', onclick: () => openProject(p), 'aria-label': `${p.title}，进度 ${pct ?? '未知'}%，打开详情` }, `${p.icon || ''} ${p.title}`.trim()),
-        h('span', {}, p.state === 'you' ? h('span', { class: 'you' }, '卡在你 ') : null, pct == null ? '—' : `${pct}%`)),
+        h('button', { type: 'button', onclick: () => openProject(p), 'aria-label': `${p.title}，进度 ${pct ?? '未知'}%${pendMark(p) ? `，${pendMark(p)}` : ''}，打开详情` }, `${p.icon || ''} ${p.title}`.trim()),
+        h('span', {}, pendMark(p) ? h('span', { class: 'pend', title: pendMark(p), 'aria-hidden': 'true' }, '● ') : null, p.state === 'you' ? h('span', { class: 'you' }, '卡在你 ') : null, pct == null ? '—' : `${pct}%`)),
       h('div', { class: 'bar', 'aria-hidden': 'true' }, fill),
       h('div', { class: 'nx' }, h('em', {}, p.dusty ? `蒙尘${Number.isFinite(dust) ? ` ${dust} 天` : ''}` : 'next'), p.next || '—'));
   }),
@@ -302,16 +310,33 @@ function mdInline(s) {
   return out;
 }
 
+// 卡行 / 弹窗上的 ● 标记：pending_edits = 还没落进 vault 卡；hermes_edits = 附言等 Hermes 处理（build_home 写入）
+const pendMark = (p) => (p.pending_edits ? '编辑待同步' : p.hermes_edits ? '附言待 Hermes 处理' : '');
+
+let curProject = null;
+
 function openProject(p) {
+  curProject = p;
+  fillProject(p);
+  setEditing(false);
+  $('pd-msg').hidden = true;
+  $('proj-dialog').showModal();
+  measureMore();
+}
+
+function measureMore() {
+  const el = $('pd-status');
+  $('pd-more').hidden = el.scrollHeight <= el.clientHeight + 1;   // 须在 showModal 后量
+}
+
+function fillProject(p) {
   const S = p.sections || {};
   $('pd-title').textContent = `${p.icon || ''} ${p.title}`;
   const pid = $('pd-id');
   pid.dataset.id = p.id || '';
   pid.textContent = p.id || '';
   pid.hidden = !p.id;
-  const TIER = { now: 'now', build: 'build', learn: 'learn', ice: 'ice' };
-  const STATUS = { active: '推进中', waiting: '等别人', you: '卡在你', ice: '冷冻', done: '完成' };
-  $('pd-badges').replaceChildren(...[p.tier && TIER[p.tier], STATUS[p.status] || p.status].filter(Boolean).map((t) => h('span', { class: `pd-badge${t === '卡在你' ? ' you' : ''}` }, t)));
+  $('pd-badges').replaceChildren(...[p.tier && TIER[p.tier], STATUS[p.status] || p.status, pendMark(p) && `● ${pendMark(p)}`].filter(Boolean).map((t) => h('span', { class: `pd-badge${t === '卡在你' ? ' you' : ''}${t.startsWith('●') ? ' pend' : ''}` }, t)));
   $('pd-next').replaceChildren(...(p.next ? [h('span', { class: 'pd-lab' }, '下一步'), ...mdInline(p.next)] : []));
   $('pd-next').hidden = !p.next;
   const dl = p.deadline ? daysUntil(p.deadline) : NaN;
@@ -339,9 +364,135 @@ function openProject(p) {
   const ob = safeUrl(p.obsidian);
   $('pd-obsidian').href = ob || '#';
   $('pd-obsidian').hidden = !ob;
-  $('proj-dialog').showModal();
-  const el = $('pd-status');
-  $('pd-more').hidden = el.scrollHeight <= el.clientHeight + 1;   // 须在 showModal 后量
+  $('pd-edit-btn').hidden = !p.id;   // 没有 ID 的卡无从定位，不给编辑
+}
+
+// ---- 编辑 → 保存 → 触发更新 ----
+function setEditing(on) {
+  $('proj-dialog').classList.toggle('editing', on);
+  $('pd-edit').hidden = !on;
+  if (!on) return;
+  const p = curProject;
+  const opts = (sel, map, cur) => {
+    const keys = Object.keys(map);
+    if (cur && !keys.includes(cur)) keys.unshift(cur);   // 卡上有非法旧值也照显，不悄悄改掉
+    $(sel).replaceChildren(h('option', { value: '' }, '—'), ...keys.map((k) => h('option', { value: k }, map[k] ? `${k} · ${map[k]}` : k)));
+    $(sel).value = cur || '';
+  };
+  $('pe-next').value = p.next || '';
+  opts('pe-status', STATUS, p.status);
+  opts('pe-tier', TIER, p.tier);
+  $('pe-deadline').value = /^\d{4}-\d{2}-\d{2}$/.test(p.deadline || '') ? p.deadline : '';
+  const ms = (p.sections || {}).milestones || [];
+  $('pe-ms-wrap').hidden = !ms.length;
+  $('pe-ms').replaceChildren(...ms.map((m, i) => {
+    const cb = h('input', { type: 'checkbox', 'data-i': String(i) });
+    cb.checked = !!m.done;
+    return h('label', { class: 'pe-ck' }, cb, h('span', {}, m.text));
+  }));
+  $('pe-note').value = '';
+  $('pe-err').textContent = '';
+  $('pe-save').disabled = false;
+  $('pe-next').focus();
+}
+
+// 只收改动过的字段 / 里程碑
+function collectEdit(p) {
+  const fields = {};
+  const cur = { next: $('pe-next').value.replace(/\s+/g, ' ').trim(), status: $('pe-status').value, tier: $('pe-tier').value, deadline: $('pe-deadline').value };
+  for (const [k, v] of Object.entries(cur)) if (v !== (p[k] || '')) fields[k] = v;
+  if ('status' in fields && !fields.status) delete fields.status;   // 「—」不算改：status / tier 不支持清空
+  if ('tier' in fields && !fields.tier) delete fields.tier;
+  const ms = (p.sections || {}).milestones || [];
+  const milestones = [...$('pe-ms').querySelectorAll('input[type=checkbox]')]
+    .map((cb) => ({ m: ms[+cb.dataset.i], done: cb.checked }))
+    .filter((x) => x.m && x.done !== !!x.m.done)
+    .map((x) => ({ text: x.m.text, done: x.done }));
+  return { fields, milestones, note: $('pe-note').value.trim() };
+}
+
+const b64enc = (s) => {
+  const bytes = new TextEncoder().encode(s);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+const b64dec = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, '')), (c) => c.charCodeAt(0)));
+
+// GET 取 sha → 末尾追加一行 → PUT；别人同时写（409/422 sha 不符）重试 2 次
+async function appendEdit(rec) {
+  const headers = { Authorization: `Bearer ${getToken()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const g = await fetch(`${API}${EDITS_PATH}?ref=home-data`, { cache: 'no-store', headers });
+    let text = '', sha;
+    if (g.ok) { const j = await g.json(); text = b64dec(j.content || ''); sha = j.sha; }
+    else if (g.status !== 404) throw new Error(`读 edits.jsonl 失败：GitHub ${g.status}`);
+    if (text && !text.endsWith('\n')) text += '\n';
+    const r = await fetch(API + EDITS_PATH, {
+      method: 'PUT', headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: `edits: ${rec.id} ${rec.target}`, branch: 'home-data', content: b64enc(text + JSON.stringify(rec) + '\n'), ...(sha ? { sha } : {}) }),
+    });
+    if (r.ok) return;
+    if (r.status === 409 || r.status === 422) continue;
+    if (r.status === 401) throw new Error('token 已失效（401）');
+    if (r.status === 403 || r.status === 404) throw new Error(`这把 token 没有 review 仓的 Contents: Write 权限（${r.status}）。到 GitHub fine-grained token 设置里给 review 仓加上 Contents: Read and write。`);
+    throw new Error(`写入失败：GitHub ${r.status}`);
+  }
+  throw new Error('连续 3 次撞上别人同时写入，请稍后再点保存');
+}
+
+// 乐观更新：本地数据先改成保存后的样子，并记一笔 pending，直到 home.json 比这次保存新
+function applyLocal(p, e) {
+  Object.assign(p, e.fields);
+  if ('status' in e.fields) p.state = STATUS[e.fields.status] ? e.fields.status : 'active';
+  const ms = (p.sections || {}).milestones || [];
+  for (const m of e.milestones) { const t = ms.find((x) => x.text === m.text); if (t) t.done = m.done; }
+  if (ms.length) {
+    const d = ms.filter((x) => x.done).length;
+    p.milestones = { done: d, total: ms.length };
+  }
+  if (e.fields && Object.keys(e.fields).length + e.milestones.length) p.pending_edits = (p.pending_edits || 0) + 1;
+  if (e.note) p.hermes_edits = (p.hermes_edits || 0) + 1;
+}
+
+function overlayEdits(data) {
+  const gen = new Date(data.generated || 0).getTime();
+  for (let i = localEdits.length - 1; i >= 0; i--) if (new Date(localEdits[i].ts).getTime() <= gen - 60000) localEdits.splice(i, 1);
+  for (const e of localEdits) {
+    const p = (data.projects || []).find((x) => x.id === e.target);
+    if (p) applyLocal(p, e);
+  }
+}
+
+async function saveEdit(ev) {
+  ev.preventDefault();
+  const p = curProject;
+  const { fields, milestones, note } = collectEdit(p);
+  if (!Object.keys(fields).length && !milestones.length && !note) { $('pe-err').textContent = '没有改动。'; return; }
+  if (!getToken()) { $('pe-err').textContent = '这台设备没有 token。'; return; }
+  const now = new Date();
+  const rnd = [...crypto.getRandomValues(new Uint8Array(2))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const rec = { id: `e:${now.toISOString().replace(/[-:]|\.\d+/g, '')}-${rnd}`, ts: now.toISOString().replace(/\.\d+Z$/, 'Z'),
+    target: p.id, fields, milestones, note, state: 'pending', from: 'web' };
+  $('pe-save').disabled = true;
+  $('pe-err').textContent = '保存中…';
+  try {
+    await appendEdit(rec);
+  } catch (e) {
+    $('pe-err').textContent = e.message;
+    $('pe-save').disabled = false;
+    return;
+  }
+  localEdits.push(rec);
+  applyLocal(p, rec);
+  fillProject(p);
+  setEditing(false);
+  measureMore();
+  const msg = `已保存${Object.keys(fields).length || milestones.length ? '，卡片 ≤5 分钟同步' : ''}${note ? '；给 Hermes 的话 ≤15 分钟处理' : ''}。`;
+  $('pd-msg').textContent = msg;
+  $('pd-msg').hidden = false;
+  setStatus(msg);
+  if (lastData) render(lastData);
 }
 
 function setTab(tab) {
@@ -357,6 +508,9 @@ $('pd-more').addEventListener('click', (e) => {
   e.currentTarget.textContent = open ? '展开' : '收起';
 });
 $('pd-close').addEventListener('click', () => $('proj-dialog').close());
+$('pd-edit-btn').addEventListener('click', () => { $('pd-msg').hidden = true; setEditing(true); });
+$('pe-cancel').addEventListener('click', () => setEditing(false));
+$('pd-edit').addEventListener('submit', saveEdit);
 $('proj-dialog').addEventListener('click', (e) => { if (e.target === $('proj-dialog')) $('proj-dialog').close(); });
 $('auth-form').addEventListener('submit', (e) => {
   e.preventDefault();

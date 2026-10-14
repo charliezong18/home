@@ -151,6 +151,28 @@ dialog p { margin-top: var(--s2); }
 #proj-dialog code { font: var(--fs-13) var(--mono); background: var(--bg); padding: 0 var(--s1); border-radius: 3px; }
 #proj-dialog a { text-decoration: underline; text-decoration-color: var(--text-3); word-break: break-all; }
 
+/* 编辑流：● 待同步标记 + 弹窗内编辑表单 */
+.proj .n .pend, .pd-badge.pend { color: var(--amber); border-color: var(--amber); }
+.pd-msg { font-size: var(--fs-13); color: var(--text-2); border-left: 3px solid var(--amber); padding-left: var(--s2); }
+#proj-dialog.editing .pd-view { display: none; }
+.pd-editbtn, .pe-act button { font: 600 var(--fs-13) var(--sans); background: none; color: var(--text); border: 1px solid var(--line-strong); border-radius: 4px; padding: var(--s1) var(--s3); cursor: pointer; margin-right: var(--s3); min-height: 32px; }
+.pd-edit { margin-top: var(--s3); display: flex; flex-direction: column; gap: var(--s3); }
+.pd-edit label { display: flex; flex-direction: column; gap: var(--s1); font-size: var(--fs-12); color: var(--text-3); letter-spacing: .05em; }
+.pd-edit input[type=text], .pd-edit input[type=date], .pd-edit select, .pd-edit textarea { font: 16px/1.4 var(--sans); color: var(--text); background: var(--bg); border: 1px solid var(--line-strong); border-radius: 4px; padding: var(--s1) var(--s2); width: 100%; min-height: 36px; }
+.pd-edit textarea { resize: vertical; }
+.pd-edit[hidden], .pd-edit [hidden] { display: none; }
+.pe-row { display: grid; grid-template-columns: 1fr 1fr 1.3fr; gap: var(--s2); }
+.pd-edit fieldset { border: 0; padding: 0; margin: 0; }
+.pd-edit legend { font-size: var(--fs-12); color: var(--text-3); letter-spacing: .05em; margin-bottom: var(--s1); }
+.pd-edit label.pe-ck { flex-direction: row; align-items: flex-start; gap: var(--s2); font-size: var(--fs-15); color: var(--text); letter-spacing: 0; padding: var(--s1) 0; }
+.pe-ck input { width: 18px; height: 18px; margin-top: 2px; flex: none; }
+.pe-err { font-size: var(--fs-13); color: var(--zhu); min-height: 1em; margin: 0; }
+.pe-act { display: flex; justify-content: flex-end; }
+.pe-act button { margin: 0 0 0 var(--s2); }
+.pe-act .primary { background: var(--text); color: var(--surface); border-color: var(--text); }
+.pe-act button:disabled { opacity: .5; cursor: default; }
+@media (max-width: 699px) { .pe-row { grid-template-columns: 1fr 1fr; } .pe-row label:last-child { grid-column: 1 / -1; } }
+
 /* 宽屏：一屏放下，不无限滚动（各栏已封顶；极矮窗口时栏内兜底滚动） */
 @media (min-width: 1100px) {
   .page { height: 100dvh; display: flex; flex-direction: column; }

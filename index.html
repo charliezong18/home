@@ -77,7 +77,7 @@
 </main>
 
 <footer class="foot">
-  <span>今日邸报由 Mac mini 采集，页面只读。处理请到门下 / Obsidian。</span>
+  <span>今日邸报由 Mac mini 采集。项目卡可在弹窗里「编辑」，其余处理请到门下 / Obsidian。</span>
   <p class="status" id="status" role="status"></p>
 </footer>
 </div>
@@ -85,14 +85,27 @@
 <dialog id="proj-dialog" aria-labelledby="pd-title">
   <article>
     <header><span class="pd-h"><strong id="pd-title"></strong> <button type="button" id="pd-id" class="cid" title="点击复制 ID" hidden></button></span><button type="button" id="pd-close" aria-label="关闭">×</button></header>
+    <p id="pd-msg" class="pd-msg" role="status" hidden></p>
     <p id="pd-badges" class="pd-badges"></p>
-    <p id="pd-next" class="pd-next"></p>
-    <p id="pd-meta" class="pd-meta"></p>
-    <section id="pd-ms-wrap" class="pd-sec"><h3 id="pd-ms-h"></h3><ul id="pd-ms" class="pd-ms"></ul></section>
+    <p id="pd-next" class="pd-next pd-view"></p>
+    <p id="pd-meta" class="pd-meta pd-view"></p>
+    <section id="pd-ms-wrap" class="pd-sec pd-view"><h3 id="pd-ms-h"></h3><ul id="pd-ms" class="pd-ms"></ul></section>
+    <form id="pd-edit" class="pd-edit" hidden>
+      <label>下一步<input id="pe-next" type="text" maxlength="300" autocomplete="off"></label>
+      <div class="pe-row">
+        <label>状态<select id="pe-status"></select></label>
+        <label>层级<select id="pe-tier"></select></label>
+        <label>截止<input id="pe-deadline" type="date"></label>
+      </div>
+      <fieldset id="pe-ms-wrap"><legend>里程碑</legend><div id="pe-ms"></div></fieldset>
+      <label>给 Hermes 的话<textarea id="pe-note" rows="3" maxlength="2000" placeholder="可空。例：这项目已经上线了，把现状和里程碑按 #185 更新"></textarea></label>
+      <p class="pe-err" id="pe-err" role="alert"></p>
+      <div class="pe-act"><button type="button" id="pe-cancel">取消</button><button type="submit" id="pe-save" class="primary">保存</button></div>
+    </form>
     <section id="pd-bl-wrap" class="pd-sec"><h3>卡点</h3><ul id="pd-bl"></ul></section>
     <section id="pd-st-wrap" class="pd-sec"><h3>现状</h3><div id="pd-status" class="pd-status clamp"></div><button type="button" id="pd-more" class="pd-more">展开</button></section>
     <section id="pd-log-wrap" class="pd-sec"><h3>日志</h3><ul id="pd-log" class="pd-log"></ul></section>
-    <p class="pd-foot"><a id="pd-obsidian" href="#">在 Obsidian 打开 →</a></p>
+    <p class="pd-foot pd-view"><button type="button" id="pd-edit-btn" class="pd-editbtn">编辑</button> <a id="pd-obsidian" href="#">在 Obsidian 打开 →</a></p>
   </article>
 </dialog>
 
