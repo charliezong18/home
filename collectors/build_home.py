@@ -34,6 +34,7 @@ def load_readings():
     for e in latest.values():
         if e.get("status") in ("done", "dropped"):
             continue
+        e["rid"] = "r:" + e["id"].removeprefix("link-")   # 展示/复制用；账本 id 唯一故 rid 唯一
         try:
             e["folded"] = (today - dt.date.fromisoformat(e.get("added", "")[:10])).days > FOLD_DAYS
         except ValueError:

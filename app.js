@@ -107,11 +107,29 @@ function srcBadge(data, name) {
 const more = (n, unit, href) => (n > 0 ? h(href ? 'a' : 'p', { class: 'more', href }, `还有 ${n} ${unit}${href ? ' → 门下' : ''}`) : null);
 const empty = (b, rest) => h('p', { class: 'empty' }, h('b', {}, b), rest || null);
 
-// 单行：编号 · 标题 · 天数（样稿 C 的密度）
+// 可复制 ID：点一下进剪贴板，成功短暂变「已复制」；剪贴板不可用则回退 prompt() 让人手动复制
+function copyId(btn, id) {
+  const done = () => {
+    const old = btn.dataset.id;
+    btn.textContent = '已复制';
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  };
+  const fallback = () => { window.prompt('复制这个 ID：', id); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(id).then(done, fallback);
+  else fallback();
+}
+
+function idBtn(id, cls = '') {
+  if (!id) return null;
+  return h('button', { type: 'button', class: `cid ${cls}`.trim(), 'data-id': id, title: '点击复制 ID', 'aria-label': `复制 ID ${id}`,
+    onclick: (e) => { e.stopPropagation(); copyId(e.currentTarget, id); } }, id);
+}
+
+// 单行：编号 · 标题 · 天数（样稿 C 的密度）。opts.id = 可复制 ID，占编号列（折 = #PR号，读物 = r:…）
 function row(k, title, href, v, opts = {}) {
   const ext = /^https?:/i.test(href || '') && !href.startsWith(MENXIA);
-  return h('div', { class: `row${opts.old ? ' old' : ''}` },
-    h('span', { class: 'k' }, k),
+  return h('div', { class: `row${opts.old ? ' old' : ''}${opts.wide ? ' wide' : ''}` },
+    opts.id ? idBtn(opts.id, 'k') : h('span', { class: 'k' }, k),
     h('a', { class: 't', href: safeUrl(href), 'aria-label': `${opts.label || title}${ext ? '（新窗口打开）' : ''}`,
       target: ext ? '_blank' : null, rel: ext ? 'noopener noreferrer' : null }, title),
     h('span', { class: 'v', 'aria-hidden': 'true' }, v));
@@ -202,7 +220,7 @@ function render(data) {
   renderLead(data, live, counts);
   $('due').replaceChildren(...(due.length ? due.slice(0, CAP.due).map((p) => h('li', { class: p.days < 0 ? 'over' : p.days <= 3 ? 'soon' : '' },
     h('span', { class: 'd' }, md(p.deadline)),
-    h('span', { class: 't' }, `${p.icon || ''} ${p.title}`.trim(), h('span', { class: 'm' }, [dueText(p.days), p.deadline_note].filter(Boolean).join(' · ')))))
+    h('span', { class: 't' }, `${p.icon || ''} ${p.title}`.trim(), h('span', { class: 'm' }, [dueText(p.days), p.deadline_note].filter(Boolean).join(' · '), ' ', idBtn(p.id)))))
     : [h('li', { class: 'empty' }, `${DUE_DAYS} 天内没有到期的事。`)]),
   ...(due.length > CAP.due ? [h('li', { class: 'empty' }, `还有 ${due.length - CAP.due} 件 · 见 Obsidian Dashboard`)] : []));
 
@@ -217,7 +235,7 @@ function render(data) {
     const list = (oldest[k] || []).slice(0, cap);
     for (const f of list) {
       const d = daysSince(f.created);
-      fkids.push(row(`#${f.n}`, f.title, f.url, waited(d), { old: k !== 'agent' && d > 3, label: `#${f.n} ${f.title}，${label}，已等 ${waited(d)}` }));
+      fkids.push(row(`#${f.n}`, f.title, f.url, waited(d), { id: `#${f.n}`, old: k !== 'agent' && d > 3, label: `#${f.n} ${f.title}，${label}，已等 ${waited(d)}` }));
     }
     fkids.push(more(n - list.length, '折', MENXIA));
   }
@@ -248,18 +266,22 @@ function render(data) {
   $('read-sum').textContent = `弘文馆 ${lib.length} · 新链接 ${newLinks.length}`;
   $('lib-count').textContent = String(lib.length);
   $('library').replaceChildren(...(lib.length
-    ? lib.slice(0, CAP.lib).map((f) => row(`#${f.n}`, f.title, f.url, waited(daysSince(f.created)), { label: `弘文馆 #${f.n} ${f.title}` }))
+    ? lib.slice(0, CAP.lib).map((f) => row(`#${f.n}`, f.title, f.url, waited(daysSince(f.created)), { id: `#${f.n}`, label: `弘文馆 #${f.n} ${f.title}` }))
     : [empty('弘文馆空着', '门下 kind:读物 的折会出现在这里。')]),
   ...[more(lib.length - CAP.lib, '篇', MENXIA)].filter(Boolean));
   $('links-count').textContent = `新 ${newLinks.length}`;
   $('links').replaceChildren(...(links.length
-    ? links.slice(0, CAP.links).map((r) => row('link', `${r.title || r.url}${r.why ? ` —「${r.why}」` : ''}`, r.url, r.added ? md(r.added) : '', { label: r.title || r.url }))
+    ? links.slice(0, CAP.links).map((r) => row('link', `${r.title || r.url}${r.why ? ` —「${r.why}」` : ''}`, r.url, r.added ? md(r.added) : '', { id: r.rid, wide: !!r.rid, label: r.title || r.url }))
     : [empty('还没丢过链接', '在任何 App 分享给 Telegram 里的 Hermes，会出现在这里。')]),
   ...[more(links.length - CAP.links, '条')].filter(Boolean));
 }
 
 function openProject(p) {
   $('pd-title').textContent = `${p.icon || ''} ${p.title}`;
+  const pid = $('pd-id');
+  pid.dataset.id = p.id || '';
+  pid.textContent = p.id || '';
+  pid.hidden = !p.id;
   $('pd-next').textContent = p.next ? `下一步：${p.next}` : '';
   $('pd-progress').textContent = `进度 ${p.progress ?? '—'}% · 里程碑 ${p.milestones?.done ?? 0}/${p.milestones?.total ?? 0}${p.deadline ? ` · deadline ${p.deadline} ${p.deadline_note || ''}` : ''}`;
   $('pd-summary').textContent = p.summary || '';
@@ -277,6 +299,7 @@ function setTab(tab) {
 
 document.querySelectorAll('.tabs [role=tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
 $('reload').addEventListener('click', load);
+$('pd-id').addEventListener('click', (e) => copyId(e.currentTarget, e.currentTarget.dataset.id));
 $('pd-close').addEventListener('click', () => $('proj-dialog').close());
 $('proj-dialog').addEventListener('click', (e) => { if (e.target === $('proj-dialog')) $('proj-dialog').close(); });
 $('auth-form').addEventListener('submit', (e) => {

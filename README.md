@@ -52,6 +52,25 @@ python3 ~/Developer/home/collectors/add_link.py 'https://example.com/post' '周�
 
 标题抓取 10 秒超时，失败用 URL 当标题（仍算成功）。同一 URL 不重复记。页面只读 `home.json`，所以链接要等下一轮 build 收录后才在页面出现——最长 30 分钟（急的话手动 `launchctl kickstart`）。
 
+## ID 约定
+
+页面上每条东西点开（或行首/行末的小 ID）都能复制一个短 ID，粘给 Hermes 就知道指哪一条。统一前缀、ASCII 前缀便于语音/复制：
+
+| ID | 指什么 | 来源 |
+|---|---|---|
+| `#<PR号>` | 折（含弘文馆） | 门下 PR 号，如 `#179` |
+| `p:<slug>` | Dashboard 项目卡 | 卡 frontmatter `id:` 优先；否则文件名去 `proj:` 前缀/emoji/标点、小写、空白→`-`（中文保留）；冲突加 `-2`、`-3`。写进 `home.json` 每张卡的 `id` |
+| `r:<id>` | 丢的链接 | 账本 id 去掉 `link-` 前缀，如 `r:20261013-b559`；`home.json` 里是 `rid` 字段 |
+| `d:<id>` | 到期项（Phase 2） | 只定格式，未实现 |
+
+Hermes 解析（读本地 `~/Developer/review-home-data/home.json`，不走网络；找不到退出码 1）：
+
+```bash
+python3 ~/Developer/home/collectors/resolve.py '#179' 'p:门下-menxia' 'r:20261013-b559'
+# 每个 ID 一行 JSON：{id, kind, title, url, meta} 或 {id, error:"not found"}
+# url：折=门下深链；项目卡=vault 绝对路径；读物=原链接。折只覆盖 home.json 收录的（每类最旧 8 折 + 弘文馆）
+```
+
 ## 手动跑
 
 ```bash

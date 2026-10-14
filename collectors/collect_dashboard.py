@@ -22,6 +22,30 @@ DUSTY_DAYS = 30
 STATE = {"active": "active", "waiting": "waiting", "you": "you", "ice": "ice", "done": "done"}
 
 
+def slugify(name):
+    """文件名 → slug：去 `proj:` 前缀与 emoji/标点，小写，空白→`-`（中文保留）。"""
+    s = re.sub(r"^proj:\s*", "", name.strip(), flags=re.I).lower()
+    return re.sub(r"[^\w]+", "-", s).strip("-_") or "card"
+
+
+def card_id(fm_id, name):
+    """卡 frontmatter 的 `id:` 优先（接受 `p:xxx` 或裸 slug），否则由文件名生成。"""
+    if fm_id:
+        return "p:" + slugify(re.sub(r"^p:", "", fm_id.strip(), flags=re.I))
+    return "p:" + slugify(name)
+
+
+def dedupe_ids(cards):
+    """slug 冲突加序号（-2、-3…），按文件名排序决定先后，保证稳定。"""
+    seen = {}
+    for c in cards:
+        base = c["id"]
+        n = seen.get(base, 0) + 1
+        seen[base] = n
+        if n > 1:
+            c["id"] = f"{base}-{n}"
+
+
 def parse_card(path):
     with open(path, encoding="utf-8") as f:
         text = f.read()
@@ -64,7 +88,7 @@ def parse_card(path):
         pass
     name = os.path.splitext(os.path.basename(path))[0]
     return {
-        "id": f"proj:{name}",
+        "id": card_id(fm.get("id"), name),
         "title": fm.get("title") or name,
         "icon": fm.get("icon", ""),
         "tier": fm.get("tier", ""),
@@ -94,6 +118,7 @@ def worker():
         if os.path.basename(path) == "README.md":
             continue
         cards.append(parse_card(path))
+    dedupe_ids(cards)
     json.dump(cards, sys.stdout, ensure_ascii=False)
 
 
