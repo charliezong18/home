@@ -107,7 +107,9 @@ function srcBadge(data, name) {
 const more = (n, unit, href) => (n > 0 ? h(href ? 'a' : 'p', { class: 'more', href }, `还有 ${n} ${unit}${href ? ' → 门下' : ''}`) : null);
 const empty = (b, rest) => h('p', { class: 'empty' }, h('b', {}, b), rest || null);
 
-// 可复制 ID：点一下进剪贴板，成功短暂变「已复制」；剪贴板不可用则回退 prompt() 让人手动复制
+// 可复制 ID：点一下进剪贴板，成功短暂变「已复制」。三级：
+// 1) 同步 textarea + execCommand('copy')（须在点击手势内同步跑；showModal 的 dialog 会让外部节点 inert，所以 textarea 挂在按钮所在的 dialog 里）
+// 2) navigator.clipboard.writeText  3) 都失败才回退 prompt() 让人手动复制
 function copyId(btn, id) {
   const done = () => {
     const old = btn.dataset.id;
@@ -115,6 +117,19 @@ function copyId(btn, id) {
     setTimeout(() => { btn.textContent = old; }, 1200);
   };
   const fallback = () => { window.prompt('复制这个 ID：', id); };
+  const legacyCopy = () => {
+    const ta = document.createElement('textarea');
+    ta.value = id;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    (btn.closest('dialog') || document.body).appendChild(ta);
+    let ok = false;
+    try { ta.focus({ preventScroll: true }); ta.select(); ta.setSelectionRange(0, id.length); ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    ta.remove();
+    btn.focus({ preventScroll: true });
+    return ok;
+  };
+  if (legacyCopy()) { done(); return; }
   if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(id).then(done, fallback);
   else fallback();
 }
