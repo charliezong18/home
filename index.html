@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://api.github.com; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="AI 主页">
+<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16171a" media="(prefers-color-scheme: dark)">
+<title>AI 主页</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-tab="today">
+<header class="top">
+  <div class="brand"><strong>AI 主页</strong> <span id="today-date"></span></div>
+  <nav class="counts" id="counts" aria-label="计数"></nav>
+  <div class="meta"><span id="gen-age"></span> <button id="reload" type="button" title="重新读取">⟳</button></div>
+</header>
+<nav class="tabs" role="tablist" aria-label="分区">
+  <button type="button" role="tab" data-tab="today">今天</button>
+  <button type="button" role="tab" data-tab="folders">折务</button>
+  <button type="button" role="tab" data-tab="projects">项目</button>
+  <button type="button" role="tab" data-tab="reading">读物</button>
+</nav>
+
+<section id="auth" class="auth" hidden>
+  <h2>需要门下那把 token</h2>
+  <p>本页与门下同源，在门下存过 token 的设备会自动读到。这台设备还没有（或已失效），粘贴一次即可——存在本设备 <code>localStorage</code> 的 <code>zhupi.token</code>，与门下共用。</p>
+  <form id="auth-form">
+    <input id="auth-input" type="password" autocomplete="off" placeholder="github_pat_…" aria-label="GitHub token">
+    <button type="submit">保存并读取</button>
+  </form>
+  <p class="err" id="auth-err"></p>
+</section>
+
+<main id="grid" class="grid" hidden>
+  <div class="col">
+    <section class="card" data-panel="today">
+      <h2>今天 / 到期 <span class="src" data-src="dashboard"></span></h2>
+      <ul id="due" class="list"></ul>
+      <p class="todo">Backlog「⏰ 有窗口的」、倒数日、日历、账单快递 —— Phase 2</p>
+    </section>
+  </div>
+  <div class="col">
+    <section class="card" data-panel="folders">
+      <h2>折务 <span class="src" data-src="menxia"></span></h2>
+      <div id="folder-counts" class="pills"></div>
+      <ul id="folders" class="list"></ul>
+      <a class="more" href="https://charliezong18.github.io/menxia/">全部 → 门下</a>
+    </section>
+    <section class="card" data-panel="projects">
+      <h2>项目 <span class="src" data-src="dashboard"></span></h2>
+      <ul id="projects" class="list"></ul>
+      <p class="more muted" id="projects-more"></p>
+    </section>
+  </div>
+  <div class="col">
+    <section class="card" data-panel="reading">
+      <h2>读物 <span class="src" data-src="menxia"></span></h2>
+      <h3>弘文馆 <span id="lib-count" class="muted"></span></h3>
+      <ul id="library" class="list"></ul>
+      <h3>丢的链接 <span id="links-count" class="muted"></span> <span class="src" data-src="readings"></span></h3>
+      <ul id="links" class="list"></ul>
+      <h3>订阅</h3>
+      <p class="todo">RSS / TrendRadar / newsletter —— Phase 3</p>
+    </section>
+  </div>
+</main>
+
+<dialog id="proj-dialog">
+  <article>
+    <header><strong id="pd-title"></strong><button type="button" id="pd-close" aria-label="关闭">×</button></header>
+    <p id="pd-next"></p>
+    <p id="pd-progress" class="muted"></p>
+    <p id="pd-summary"></p>
+    <p class="muted"><span id="pd-updated"></span> · <a id="pd-obsidian" href="#">在 Obsidian 打开</a></p>
+  </article>
+</dialog>
+
+<p class="status" id="status"></p>
+<script src="app.js"></script>
+</body>
+</html>
