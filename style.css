@@ -125,6 +125,31 @@ dialog::backdrop { background: rgb(0 0 0 / .5); }
 dialog header { display: flex; justify-content: space-between; gap: var(--s4); font: 700 var(--fs-18)/1.35 var(--serif); }
 dialog header button { background: none; border: 0; font-size: var(--fs-22); cursor: pointer; line-height: 1; }
 dialog p { margin-top: var(--s2); }
+#proj-dialog { width: min(34rem, 92vw); max-height: 88dvh; overflow-y: auto; overscroll-behavior: contain; }
+#proj-dialog header { position: sticky; top: calc(-1 * var(--s4)); background: var(--surface); z-index: 1; padding-bottom: var(--s2); }
+.pd-badges { display: flex; gap: var(--s2); }
+.pd-badge { font-size: var(--fs-12); padding: 1px var(--s2); border: 1px solid var(--line-strong); border-radius: 3px; color: var(--text-2); }
+.pd-badge.you { color: var(--zhu); border-color: var(--zhu); }
+.pd-next { font: 600 var(--fs-18)/1.4 var(--sans); margin-top: var(--s3); }
+.pd-lab { display: block; font: 400 var(--fs-12) var(--sans); color: var(--text-3); letter-spacing: .1em; }
+.pd-meta { font-size: var(--fs-13); color: var(--text-2); }
+.pd-meta .late { color: var(--zhu); font-weight: 600; }
+.pd-sec { margin-top: var(--s4); }
+.pd-sec h3 { font: 600 var(--fs-13) var(--sans); color: var(--text-3); letter-spacing: .08em; margin-bottom: var(--s1); }
+.pd-sec ul { list-style: none; }
+.pd-sec li { margin-top: var(--s1); }
+.pd-ms li { display: flex; gap: var(--s2); }
+.pd-ms li.done { color: var(--text-3); }
+.pd-ms .ck { font-family: var(--mono); }
+#pd-bl li { color: var(--amber); }
+.pd-status p { margin: 0 0 var(--s1); }
+.pd-status.clamp { max-height: 3em; overflow: hidden; }
+.pd-more { background: none; border: 0; padding: var(--s1) 0; color: var(--text-2); font-size: var(--fs-13); cursor: pointer; text-decoration: underline; }
+.pd-log { font-size: var(--fs-13); color: var(--text-3); }
+.pd-foot { margin-top: var(--s4); font-size: var(--fs-13); }
+.pd-foot a { text-decoration: underline; }
+#proj-dialog code { font: var(--fs-13) var(--mono); background: var(--bg); padding: 0 var(--s1); border-radius: 3px; }
+#proj-dialog a { text-decoration: underline; text-decoration-color: var(--text-3); word-break: break-all; }
 
 /* 宽屏：一屏放下，不无限滚动（各栏已封顶；极矮窗口时栏内兜底滚动） */
 @media (min-width: 1100px) {
@@ -147,6 +172,8 @@ dialog p { margin-top: var(--s2); }
 /* 手机：顶部计数条 + tab，一 tab 一屏 */
 @media (max-width: 699px) {
   .page { padding: 0 var(--s4) var(--s5); padding-top: env(safe-area-inset-top); }
+  #proj-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; border-radius: 0; padding-top: max(var(--s4), env(safe-area-inset-top)); }
+  #proj-dialog header { top: calc(-1 * max(var(--s4), env(safe-area-inset-top))); }
   .mast { position: sticky; top: 0; z-index: 2; background: var(--bg); grid-template-columns: 1fr; gap: var(--s2); padding-top: var(--s3); border-bottom: 1px solid var(--line-strong); padding-bottom: 0; }
   .mast h1 { font-size: var(--fs-22); letter-spacing: .24em; display: inline; }
   .mast .date { display: inline; margin-left: var(--s2); }

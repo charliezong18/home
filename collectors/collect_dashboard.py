@@ -46,6 +46,45 @@ def dedupe_ids(cards):
             c["id"] = f"{base}-{n}"
 
 
+def _items(lines):
+    """小节行 → 条目：列表项各成一条（去 `- `/`1. `），否则按空行分段。"""
+    out, para = [], []
+
+    def flush():
+        if para:
+            out.append(" ".join(para))
+            para.clear()
+
+    for ln in lines:
+        lm = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.*)$", ln)
+        if lm:
+            flush()
+            out.append(lm.group(1).strip())
+        elif ln.strip():
+            para.append(ln.strip())
+        else:
+            flush()
+    flush()
+    return [x for x in out if x]
+
+
+def parse_sections(sections):
+    """契约小节 → 弹窗用结构：status_text / milestones[{done,text}] / blockers / related / log(最近 5 条，文件顺序)。"""
+    ms = []
+    for ln in sections.get("里程碑", []):
+        cm = re.match(r"^\s*[-*]\s+\[( |x|X)\]\s*(.*)$", ln)
+        if cm:
+            ms.append({"done": cm.group(1).lower() == "x", "text": cm.group(2).strip()})
+    status = "\n".join(sections.get("现状", [])).strip()
+    return {
+        "status_text": re.sub(r"\n{3,}", "\n\n", status)[:2000],
+        "milestones": ms,
+        "blockers": _items(sections.get("卡点", [])),
+        "related": _items(sections.get("相关", [])),
+        "log": _items(sections.get("日志", []))[-5:],
+    }
+
+
 def parse_card(path):
     with open(path, encoding="utf-8") as f:
         text = f.read()
@@ -76,6 +115,7 @@ def parse_card(path):
         if cm:
             total += 1
             done += cm.group(1).lower() == "x"
+    detail = parse_sections(sections)
     progress = None
     if fm.get("progress", "").isdigit():
         progress = int(fm["progress"])
@@ -101,6 +141,7 @@ def parse_card(path):
         "progress": progress,
         "milestones": {"done": done, "total": total},
         "summary": summary[:400],
+        "sections": detail,
         "dusty": dusty,
         "ref": f"Dashboard/{name}.md",
         "obsidian": "obsidian://open?vault=Hang&file=" + subprocess_quote(f"Dashboard/{name}"),

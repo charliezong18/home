@@ -85,10 +85,14 @@
 <dialog id="proj-dialog" aria-labelledby="pd-title">
   <article>
     <header><span class="pd-h"><strong id="pd-title"></strong> <button type="button" id="pd-id" class="cid" title="点击复制 ID" hidden></button></span><button type="button" id="pd-close" aria-label="关闭">×</button></header>
-    <p id="pd-next"></p>
-    <p id="pd-progress" class="muted"></p>
-    <p id="pd-summary"></p>
-    <p class="muted"><span id="pd-updated"></span> · <a id="pd-obsidian" href="#">在 Obsidian 打开</a></p>
+    <p id="pd-badges" class="pd-badges"></p>
+    <p id="pd-next" class="pd-next"></p>
+    <p id="pd-meta" class="pd-meta"></p>
+    <section id="pd-ms-wrap" class="pd-sec"><h3 id="pd-ms-h"></h3><ul id="pd-ms" class="pd-ms"></ul></section>
+    <section id="pd-bl-wrap" class="pd-sec"><h3>卡点</h3><ul id="pd-bl"></ul></section>
+    <section id="pd-st-wrap" class="pd-sec"><h3>现状</h3><div id="pd-status" class="pd-status clamp"></div><button type="button" id="pd-more" class="pd-more">展开</button></section>
+    <section id="pd-log-wrap" class="pd-sec"><h3>日志</h3><ul id="pd-log" class="pd-log"></ul></section>
+    <p class="pd-foot"><a id="pd-obsidian" href="#">在 Obsidian 打开 →</a></p>
   </article>
 </dialog>
 

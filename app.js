@@ -291,20 +291,57 @@ function render(data) {
   ...[more(links.length - CAP.links, '条')].filter(Boolean));
 }
 
+// 行内 markdown 最小渲染：**粗体** `code` [[wikilink]]→文本 裸 URL→链接。直接建 DOM 节点（textContent），天然不经 HTML 解析
+function mdInline(s) {
+  const out = []; let i = 0;
+  for (const m of String(s || '').matchAll(/\*\*(.+?)\*\*|`([^`]+)`|\[\[([^\]]+)\]\]|(https?:\/\/[^\s<>)\]]+)/g)) {
+    out.push(s.slice(i, m.index)); i = m.index + m[0].length;
+    out.push(m[1] ? h('strong', {}, m[1]) : m[2] ? h('code', {}, m[2]) : m[3] ? m[3].split('|').pop() : h('a', { href: m[4], target: '_blank', rel: 'noopener noreferrer' }, m[4]));
+  }
+  out.push(String(s || '').slice(i));
+  return out;
+}
+
 function openProject(p) {
+  const S = p.sections || {};
   $('pd-title').textContent = `${p.icon || ''} ${p.title}`;
   const pid = $('pd-id');
   pid.dataset.id = p.id || '';
   pid.textContent = p.id || '';
   pid.hidden = !p.id;
-  $('pd-next').textContent = p.next ? `下一步：${p.next}` : '';
-  $('pd-progress').textContent = `进度 ${p.progress ?? '—'}% · 里程碑 ${p.milestones?.done ?? 0}/${p.milestones?.total ?? 0}${p.deadline ? ` · deadline ${p.deadline} ${p.deadline_note || ''}` : ''}`;
-  $('pd-summary').textContent = p.summary || '';
-  $('pd-updated').textContent = `卡片更新于 ${p.updated || '未知'}${p.dusty ? ' · 蒙尘' : ''}`;
+  const TIER = { now: 'now', build: 'build', learn: 'learn', ice: 'ice' };
+  const STATUS = { active: '推进中', waiting: '等别人', you: '卡在你', ice: '冷冻', done: '完成' };
+  $('pd-badges').replaceChildren(...[p.tier && TIER[p.tier], STATUS[p.status] || p.status].filter(Boolean).map((t) => h('span', { class: `pd-badge${t === '卡在你' ? ' you' : ''}` }, t)));
+  $('pd-next').replaceChildren(...(p.next ? [h('span', { class: 'pd-lab' }, '下一步'), ...mdInline(p.next)] : []));
+  $('pd-next').hidden = !p.next;
+  const dl = p.deadline ? daysUntil(p.deadline) : NaN;
+  const meta = [];
+  if (p.deadline) meta.push(h('span', { class: Number.isFinite(dl) && dl < 0 ? 'late' : '' }, `截止 ${p.deadline}${p.deadline_note ? ` ${p.deadline_note}` : ''}${Number.isFinite(dl) && dl < 0 ? `（已过 ${-dl} 天）` : ''}`));
+  meta.push(`更新于 ${p.updated || '未知'}`);
+  if (p.dusty) meta.push(`蒙尘 ${daysSince(p.updated)} 天`);
+  $('pd-meta').replaceChildren(...meta.flatMap((m, k) => (k ? [' · ', m] : [m])));
+  const ms = S.milestones || [];
+  $('pd-ms-wrap').hidden = !ms.length;
+  $('pd-ms-h').textContent = `里程碑 ${ms.filter((m) => m.done).length}/${ms.length}`;
+  $('pd-ms').replaceChildren(...ms.map((m) => h('li', { class: m.done ? 'done' : '' }, h('span', { class: 'ck', 'aria-hidden': 'true' }, m.done ? '☑' : '☐'), h('span', {}, ...mdInline(m.text)))));
+  const bl = S.blockers || [];
+  $('pd-bl-wrap').hidden = !bl.length;
+  $('pd-bl').replaceChildren(...bl.map((b) => h('li', {}, ...mdInline(b))));
+  const st = (S.status_text || p.summary || '').split('\n').filter((l) => l.trim());
+  $('pd-st-wrap').hidden = !st.length;
+  $('pd-status').replaceChildren(...st.map((l) => h('p', {}, ...mdInline(l.replace(/^\s*[-*+]\s+/, '• ')))));
+  $('pd-status').classList.add('clamp');
+  $('pd-more').hidden = true;
+  $('pd-more').textContent = '展开';
+  const lg = (S.log || []).slice(-3).reverse();
+  $('pd-log-wrap').hidden = !lg.length;
+  $('pd-log').replaceChildren(...lg.map((l) => h('li', {}, ...mdInline(l))));
   const ob = safeUrl(p.obsidian);
   $('pd-obsidian').href = ob || '#';
   $('pd-obsidian').hidden = !ob;
   $('proj-dialog').showModal();
+  const el = $('pd-status');
+  $('pd-more').hidden = el.scrollHeight <= el.clientHeight + 1;   // 须在 showModal 后量
 }
 
 function setTab(tab) {
@@ -315,6 +352,10 @@ function setTab(tab) {
 document.querySelectorAll('.tabs [role=tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
 $('reload').addEventListener('click', load);
 $('pd-id').addEventListener('click', (e) => copyId(e.currentTarget, e.currentTarget.dataset.id));
+$('pd-more').addEventListener('click', (e) => {
+  const open = $('pd-status').classList.toggle('clamp');
+  e.currentTarget.textContent = open ? '展开' : '收起';
+});
 $('pd-close').addEventListener('click', () => $('proj-dialog').close());
 $('proj-dialog').addEventListener('click', (e) => { if (e.target === $('proj-dialog')) $('proj-dialog').close(); });
 $('auth-form').addEventListener('submit', (e) => {
