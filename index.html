@@ -8,27 +8,33 @@
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src https://api.github.com; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="AI 主页">
-<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#16171a" media="(prefers-color-scheme: dark)">
-<title>AI 主页</title>
+<meta name="theme-color" content="#F6F7F8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111418" media="(prefers-color-scheme: dark)">
+<title>邸报 · AI 主页</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body data-tab="today">
-<header class="top">
-  <div class="brand"><strong>AI 主页</strong> <span id="today-date"></span></div>
-  <nav class="counts" id="counts" aria-label="计数"></nav>
-  <div class="meta"><span id="gen-age"></span> <button id="reload" type="button" title="重新读取">⟳</button></div>
+<div class="page">
+<header class="mast">
+  <div class="mast-l">
+    <h1>邸報</h1>
+    <div class="date"><span id="today-date"></span></div>
+  </div>
+  <div class="mast-r">
+    <nav class="tally" id="counts" aria-label="计数"></nav>
+    <div class="fresh"><span id="fresh"></span> · <span id="gen-age"></span> <button id="reload" type="button" aria-label="重新读取" title="重新读取">⟳</button></div>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="分区">
+    <button type="button" role="tab" data-tab="today">头条</button>
+    <button type="button" role="tab" data-tab="folders">折务</button>
+    <button type="button" role="tab" data-tab="projects">项目</button>
+    <button type="button" role="tab" data-tab="reading">读物</button>
+  </nav>
 </header>
-<nav class="tabs" role="tablist" aria-label="分区">
-  <button type="button" role="tab" data-tab="today">今天</button>
-  <button type="button" role="tab" data-tab="folders">折务</button>
-  <button type="button" role="tab" data-tab="projects">项目</button>
-  <button type="button" role="tab" data-tab="reading">读物</button>
-</nav>
 
 <section id="auth" class="auth" hidden>
-  <h2>需要门下那把 token</h2>
-  <p>本页与门下同源，在门下存过 token 的设备会自动读到。这台设备还没有（或已失效），粘贴一次即可——存在本设备 <code>localStorage</code> 的 <code>zhupi.token</code>，与门下共用。</p>
+  <h2>这台设备还没连上门下。</h2>
+  <p>粘贴一次 token，之后自动读取。本页与门下同源，token 存在本设备 <code>localStorage</code> 的 <code>zhupi.token</code>，与门下共用。</p>
   <form id="auth-form">
     <input id="auth-input" type="password" autocomplete="off" placeholder="github_pat_…" aria-label="GitHub token">
     <button type="submit">保存并读取</button>
@@ -37,40 +43,46 @@
 </section>
 
 <main id="grid" class="grid" hidden>
-  <div class="col">
-    <section class="card" data-panel="today">
-      <h2>今天 / 到期 <span class="src" data-src="dashboard"></span></h2>
-      <ul id="due" class="list"></ul>
-      <p class="todo">Backlog「⏰ 有窗口的」、倒数日、日历、账单快递 —— Phase 2</p>
+  <!-- Q1 今天什么需要我：头条 + 到期栏 -->
+  <section class="above" data-panel="today" aria-label="今天什么需要我">
+    <article class="lead" id="lead"></article>
+    <aside class="due">
+      <h2>到期 · 14 天内 <span class="src" data-src="dashboard"></span></h2>
+      <ul id="due"></ul>
+      <p class="empty"><b>账单 · 日历 · 有窗口的 Backlog · 倒数日</b>Phase 2 接入；付账这类动作会排在本栏顶部，过期标朱色。</p>
+    </aside>
+  </section>
+
+  <div class="cols">
+    <!-- Q2 手头的事到哪了：折务（C 的单行密度）+ 项目 -->
+    <section class="col" data-panel="folders" aria-labelledby="h-folders">
+      <h2 class="sec" id="h-folders">折务 <small><span id="folder-sum"></span> <span class="src" data-src="menxia"></span></small></h2>
+      <div id="folders"></div>
     </section>
-  </div>
-  <div class="col">
-    <section class="card" data-panel="folders">
-      <h2>折务 <span class="src" data-src="menxia"></span></h2>
-      <div id="folder-counts" class="pills"></div>
-      <ul id="folders" class="list"></ul>
-      <a class="more" href="https://charliezong18.github.io/menxia/">全部 → 门下</a>
+    <section class="col" data-panel="projects" aria-labelledby="h-projects">
+      <h2 class="sec" id="h-projects">项目 <small><span id="proj-sum"></span> <span class="src" data-src="dashboard"></span></small></h2>
+      <div id="projects"></div>
     </section>
-    <section class="card" data-panel="projects">
-      <h2>项目 <span class="src" data-src="dashboard"></span></h2>
-      <ul id="projects" class="list"></ul>
-      <p class="more muted" id="projects-more"></p>
-    </section>
-  </div>
-  <div class="col">
-    <section class="card" data-panel="reading">
-      <h2>读物 <span class="src" data-src="menxia"></span></h2>
-      <h3>弘文馆 <span id="lib-count" class="muted"></span></h3>
-      <ul id="library" class="list"></ul>
-      <h3>丢的链接 <span id="links-count" class="muted"></span> <span class="src" data-src="readings"></span></h3>
-      <ul id="links" class="list"></ul>
-      <h3>订阅</h3>
-      <p class="todo">RSS / TrendRadar / newsletter —— Phase 3</p>
+    <!-- Q3 有什么值得读 -->
+    <section class="col" data-panel="reading" aria-labelledby="h-reading">
+      <h2 class="sec" id="h-reading">读物 <small id="read-sum"></small></h2>
+      <h3 class="sub">弘文馆 <span id="lib-count"></span> <span class="src" data-src="menxia"></span></h3>
+      <div id="library" class="read"></div>
+      <h3 class="sub">丢的链接 <span id="links-count"></span> <span class="src" data-src="readings"></span></h3>
+      <div id="links" class="read"></div>
+      <h3 class="sub">订阅</h3>
+      <p class="empty"><b>订阅还没接入</b>RSS 与 TrendRadar 在 Phase 3 接入；先把链接转给 Hermes，会出现在上面。</p>
     </section>
   </div>
 </main>
 
-<dialog id="proj-dialog">
+<footer class="foot">
+  <span>今日邸报由 Mac mini 采集，页面只读。处理请到门下 / Obsidian。</span>
+  <p class="status" id="status" role="status"></p>
+</footer>
+</div>
+
+<dialog id="proj-dialog" aria-labelledby="pd-title">
   <article>
     <header><strong id="pd-title"></strong><button type="button" id="pd-close" aria-label="关闭">×</button></header>
     <p id="pd-next"></p>
@@ -80,7 +92,6 @@
   </article>
 </dialog>
 
-<p class="status" id="status"></p>
 <script src="app.js"></script>
 </body>
 </html>
