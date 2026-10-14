@@ -84,6 +84,10 @@ python3 ~/Developer/home/collectors/apply_edits.py --mark-done <id> --result "�
 
 幂等：账本按 `id` 合并，只处理 `state=pending`；卡已落但账本没推上时，下轮重放不会重复记日志。vault 读写超 30 秒整轮跳过，下轮再试。`edits.jsonl` schema 见 home-data 分支 README。
 
+## 夜间养卡摘要
+
+`python3 ~/Developer/home/collectors/daily_digest.py [--date YYYY-MM-DD] [--out PATH] [--max-chars 60000]`：把当天（America/Los_Angeles）Hermes 会话、Claude transcript、主页编辑摘成 `~/Library/Caches/ai-home/digest-<date>.md`，供 Claude 对照 Dashboard 卡更新；stdout 一行统计，无内容打 `digest <date> empty`。只读、纯标准库。
+
 ## 手动跑
 
 ```bash
