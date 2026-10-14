@@ -11,6 +11,16 @@
 - [x] launchd com.charlie.ai-home 已 bootstrap，RunAtLoad 与 kickstart 两轮 exit 0
 - [x] 告警逻辑 dry-run：连败 5 次只告警 1 次，成功清零
 
+## 编辑流（任务 t-20261013-231813-3842，2026-10-13 23:40 PDT）
+- [x] 写入探测：gh 账号 token 对 home-data PUT/DELETE `edits/.probe` 成功；**页面 PAT 本身未探测**（localStorage 读不到）
+- [x] `collectors/apply_edits.py`（apply / --list-pending-notes / --mark-done）+ build_home 写 `pending_edits`/`hermes_edits`
+- [x] 验收：测试编辑 → needs_hermes → list 列出 → mark-done 后不列；vault 卡已用备份原样恢复（diff 空）
+- [x] launchd `com.charlie.ai-home-edits`（300s，run_edits.sh）已 bootstrap
+- [x] 页面：弹窗「编辑 → 保存」、乐观更新、● 标记；已 push main
+- [x] README（home + home-data）编辑流一节
+- [ ] Charlie 浏览器实测「编辑 → 保存」（含 PAT 是否有 Contents: write）
+- [ ] Hermes cron：每 15 分钟 `apply_edits.py --list-pending-notes`，有单就派 Claude，完了 `--mark-done`
+
 ## 下一步（留给 Charlie / 后续）
 - [ ] 四端打开 + 同源 token 是否读到（§7 第 5 行）——需 Charlie 在 Mac / iPhone / iPad / 工作电脑上各开一次
 - [ ] Hermes 路由：「只有链接（+一句话）」→ 调 `python3 ~/Developer/home/collectors/add_link.py <url> [附言]`，成功回 ✓

@@ -71,6 +71,19 @@ python3 ~/Developer/home/collectors/resolve.py '#179' 'p:门下-menxia' 'r:20261
 # url：折=门下深链；项目卡=vault 绝对路径；读物=原链接。折只覆盖 home.json 收录的（每类最旧 8 折 + 弘文馆）
 ```
 
+## 编辑流（弹窗编辑 → 保存 → 触发更新）
+
+1. 页面：项目卡弹窗「编辑」可改 `next` / `status` / `tier` / `deadline`、勾里程碑，另有「给 Hermes 的话」。「保存」用同一把 `zhupi.token` 往 review 仓 `home-data` 分支的 `edits.jsonl` 追加一行 `state:"pending"`（GET sha → 追加 → PUT，sha 冲突重试 2 次）。**token 需要 review 仓 Contents: Read and write**；没有时保存会报 403 并提示。
+2. Mac mini：launchd `com.charlie.ai-home-edits` 每 5 分钟跑 `collectors/run_edits.sh` = `apply_edits.py`（按白名单改 vault 卡 frontmatter、按文本勾/取消里程碑、`updated` 改今天、`## 日志` 末尾追加 `- YYYY-MM-DD 主页编辑：…`；改了卡就立刻重采 dashboard）→ `build_home.py`。日志 `~/Library/Logs/ai-home/edits.log`。
+3. 附言：有 `note` 的编辑字段照常落卡，然后标 `needs_hermes`。**apply_edits 不调 claude**；Hermes cron 取单子、派 Claude 处理、处理完标 done：
+
+```bash
+python3 ~/Developer/home/collectors/apply_edits.py --list-pending-notes          # JSON 数组：needs_hermes 且未 done
+python3 ~/Developer/home/collectors/apply_edits.py --mark-done <id> --result "一句话结果"
+```
+
+幂等：账本按 `id` 合并，只处理 `state=pending`；卡已落但账本没推上时，下轮重放不会重复记日志。vault 读写超 30 秒整轮跳过，下轮再试。`edits.jsonl` schema 见 home-data 分支 README。
+
 ## 手动跑
 
 ```bash
@@ -89,8 +102,9 @@ git clone https://github.com/charliezong18/home ~/Developer/home
 git -C ~/Developer/review fetch origin home-data
 git -C ~/Developer/review worktree add ~/Developer/review-home-data home-data
 mkdir -p ~/Library/Logs/ai-home
-cp ~/Developer/home/launchd/com.charlie.ai-home.plist ~/Library/LaunchAgents/
+cp ~/Developer/home/launchd/com.charlie.ai-home.plist ~/Developer/home/launchd/com.charlie.ai-home-edits.plist ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.charlie.ai-home.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.charlie.ai-home-edits.plist
 ```
 
 需要：`gh` 已登录且能读 review 仓；`git` 能 push review 仓。
