@@ -38,7 +38,7 @@ Hermes 丢链接 → collectors/add_link.py <url> [附言] → readings.jsonl �
 |---|---|
 | `sources.{menxia,dashboard,readings}` | `updated / ok / consecutive_failures / last_error` |
 | `folders.counts` | 按 `wait:` label 计：你拍 / 你读 / agent / 闲 / 未标注 |
-| `folders.oldest` | 每类最旧 8 折，带门下深链 `https://charliezong18.github.io/menxia/?pr=<n>` |
+| `folders.oldest` | 每类最旧 8 折，带门下深链 `https://menxia-reader.github.io/menxia/?pr=<n>` |
 | `library` | 弘文馆 = open 且 `kind:读物` |
 | `projects` | Dashboard 卡：frontmatter + `## 现状` 首段 + 里程碑勾选比例 |
 | `readings` | `readings.jsonl` 按 id 归并、去掉 done/dropped；超 30 天 `folded` |

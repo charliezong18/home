@@ -1,5 +1,6 @@
 // AI 主页 —— 纯静态、无依赖。数据全部运行时从私有仓 review 的 home-data 分支读，页面本身不含任何数据。
-// 鉴权与门下同源共用：localStorage 键 `zhupi.token`（同 menxia/src/github.js 的 getToken/setToken）。
+// 鉴权：localStorage 键 `zhupi.token`（键名沿用 menxia/src/github.js 的 getToken/setToken）。
+// 2026-10-19 门下迁到 menxia-reader.github.io（Q10），本页仍在 charliezong18.github.io，两边不再同源、token 各存各的。
 // 呈现：邸报（review #185 批定）。三问顺序：今天什么需要我（头条 + 到期）→ 手头的事到哪了（折务 / 项目）→ 有什么值得读。
 'use strict';
 
@@ -7,7 +8,7 @@ const API = 'https://api.github.com';
 const TOKEN_KEY = 'zhupi.token';
 const DATA_PATH = '/repos/charliezong18/review/contents/home.json?ref=home-data';
 const STALE_H = { menxia: 4, dashboard: 4, readings: 4 };   // 3h 心跳 + 30min 采集周期 + 余量
-const MENXIA = 'https://charliezong18.github.io/menxia/';
+const MENXIA = 'https://menxia-reader.github.io/menxia/';
 // 每栏封顶条数（宽屏 1280×800 一屏放下），超出显示「还有 N 条 →」，不做无限滚动
 const CAP = { due: 6, proj: 6, lib: 5, links: 3 };
 const FOLDER_GROUPS = [['你拍', '待你拍', 5], ['你读', '待你读', 3], ['agent', '等 agent', 2]];
