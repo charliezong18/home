@@ -34,7 +34,7 @@
 
 <section id="auth" class="auth" hidden>
   <h2>这台设备还没连上门下。</h2>
-  <p>粘贴一次 token，之后自动读取。本页与门下同源，token 存在本设备 <code>localStorage</code> 的 <code>zhupi.token</code>，与门下共用。</p>
+  <p>粘贴一次 token，之后自动读取。token 存在本设备 <code>localStorage</code> 的 <code>zhupi.token</code>（门下已迁到独立域名，与本页不再共用）。</p>
   <form id="auth-form">
     <input id="auth-input" type="password" autocomplete="off" placeholder="github_pat_…" aria-label="GitHub token">
     <button type="submit">保存并读取</button>

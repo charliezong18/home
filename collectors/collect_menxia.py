@@ -6,7 +6,7 @@ import sys
 from common import REPO, die, log, run, save_snapshot
 
 OLDEST_N = 8
-DESK = "https://charliezong18.github.io/menxia/?pr={n}"
+DESK = "https://menxia-reader.github.io/menxia/?pr={n}"
 WAITS = ["你拍", "你读", "agent", "闲"]
 
 
