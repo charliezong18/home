@@ -128,8 +128,9 @@ def fetch_decisions(n, gh=gh_json):
 # ---------- 归属 Hermes 会话 ----------
 
 def term_re(term):
-    """完整 token 匹配：前后不能紧贴字母数字/_/-，所以 pull/190 不中 pull/1901，branch-190 不中 branch-1900 / x-branch-190。"""
-    return re.compile(r"(?<![\w-])" + re.escape(term) + r"(?![\w-])")
+    """完整 token 匹配：前后不能紧贴 ASCII 字母数字/_/-，所以 pull/190 不中 pull/1901，branch-190 不中 branch-1900 / x-branch-190；
+    不用 \\w——它含中文，「折menxia-mac-plan已合」这种中文紧贴写法会漏计。"""
+    return re.compile(r"(?<![A-Za-z0-9_-])" + re.escape(term) + r"(?![A-Za-z0-9_-])")
 
 
 def resolve_owner(pr, db=None):

@@ -279,6 +279,7 @@ class TestFixes(Base):
             ("decoy", "menxia-mac-plan 草稿", None, t), ("decoy", "x-menxia-mac 旧分支", None, t),
             ("decoy", "见 review/pull/1901", None, t), ("decoy", "review/pull/1902", None, t),
             ("real", "push origin/menxia-mac 完", None, t), ("real", None, '{"url":"review/pull/190."}', t),
+            ("real", "折menxia-mac已呈", None, t),  # 中文紧贴也算完整 token
         ])
         con.commit()
         con.close()
@@ -286,6 +287,7 @@ class TestFixes(Base):
         j = next(iter(self.jobs()["jobs"].values()))
         self.assertEqual(j["owner_session"], "real")
         self.assertNotIn("decoy", j["owner_reason"])
+        self.assertIn("('real', 3)", j["owner_reason"])
 
     def test_comments_paginated(self):
         cs = [{"id": i, "created_at": f"2026-10-24T19:{i // 60:02d}:{i % 60:02d}Z", "body": f"判 {i}"} for i in range(150)]
