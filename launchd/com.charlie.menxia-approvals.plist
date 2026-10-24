@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.charlie.menxia-approvals</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/python3</string>
+        <string>/Users/charliezong/Developer/home/collectors/approvals.py</string>
+        <string>scan</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>/Users/charliezong/Developer/home/collectors</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/charliezong</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/charliezong/Library/Logs/ai-home/approvals.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/charliezong/Library/Logs/ai-home/approvals.log</string>
+</dict>
+</plist>

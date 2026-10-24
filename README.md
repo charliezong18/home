@@ -88,6 +88,16 @@ python3 ~/Developer/home/collectors/apply_edits.py --mark-done <id> --result "�
 
 `python3 ~/Developer/home/collectors/daily_digest.py [--date YYYY-MM-DD] [--out PATH] [--max-chars 60000]`：把当天（America/Los_Angeles）Hermes 会话、Claude transcript、主页编辑摘成 `~/Library/Caches/ai-home/digest-<date>.md`，供 Claude 对照 Dashboard 卡更新；stdout 一行统计，无内容打 `digest <date> empty`。只读、纯标准库。
 
+## 门下画可接管（approvals.py）
+
+画可（merge）不等于完成，也不等于概括授权。`collectors/approvals.py` 由 launchd `com.charlie.menxia-approvals` 每 5 分钟跑 `scan`：gh api 增量拉 closed PR（游标 + 6 小时回看，失败不前移游标，停机重启后自动补漏），每个 merge 按 `repo#PR@merge_sha` 幂等记一张单。`kind:读物/参考` 只进 `references`，不生成执行单。
+
+单子带：PR body 的「待你拍板」「目的地」、他在折里的判（原文，去掉续读标记和 `**回话**`）、归属 Hermes 会话（merge 前 Hermes 消息里提到该折分支名或 `review/pull/N` 最多的非 cron 会话；并列或无命中时为 null，由 Hermes `set-owner`）。
+
+状态：`pending 待接手 → executing 执行中 → verifying 验收 → done 完成`，`blocked 阻塞` 旁路。进 executing 必须 `--scope`（Hermes 读全文后写明范围）；done 只能从 verifying 来且必须 `--evidence`。`--event-id` 幂等。`--writeback` / `sync` 只改门下 label（pending→`wait:agent`；执行中/验收另加 `agent:claimed`；阻塞→`agent:blocked`+`wait:你拍`；完成→去掉 wait/agent），不发会话区评论。launchd 那份 scan 不带 `--writeback`。
+
+台账 `~/.local/state/menxia-approvals/approvals.json`、`events.log`；日志 `~/Library/Logs/ai-home/approvals.log`。命令见 `approvals.py` 文首；单测 `python3 collectors/test_approvals.py -v`。
+
 ## 手动跑
 
 ```bash
