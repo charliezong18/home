@@ -16,6 +16,7 @@ kind:读物 / kind:参考 → 记 reference（仅留档，不生成执行单）�
   pending/executing/verifying: −wait:你拍 −wait:你读 +wait:agent；executing/verifying 另加 agent:claimed
   blocked: −wait:agent −agent:claimed +agent:blocked +wait:你拍
   done: 去掉 wait:* 与 agent:*
+  回写前先 gh api 只读核对要加的 label 在仓里存在，缺的 gh label create 补；写失败退出码 2，台账不回滚。
 
 用法：
   approvals.py scan [--since ISO] [--writeback]   增量检测 merge（launchd 每 5 分钟跑，不带 --writeback）
@@ -32,6 +33,7 @@ import datetime as _dt
 import fcntl
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -97,12 +99,24 @@ def fetch_merged_since(since, gh=gh_json):
     return out
 
 
+def gh_pages(path, gh=gh_json, per_page=100):
+    """翻完全部页（评论/label 超过一页时不截断）。"""
+    out, page = [], 1
+    sep = "&" if "?" in path else "?"
+    while True:
+        batch = gh(f"{path}{sep}per_page={per_page}&page={page}") or []
+        out += batch
+        if len(batch) < per_page:
+            return out
+        page += 1
+
+
 def fetch_decisions(n, gh=gh_json):
     """他在折里的判（原文）：会话区评论 + 行内评论，去掉续读标记与 agent 的 **回话**。"""
     items = []
-    for kind, path in (("conversation", f"repos/{REPO}/issues/{n}/comments?per_page=100"),
-                       ("inline", f"repos/{REPO}/pulls/{n}/comments?per_page=100")):
-        for c in gh(path) or []:
+    for kind, path in (("conversation", f"repos/{REPO}/issues/{n}/comments"),
+                       ("inline", f"repos/{REPO}/pulls/{n}/comments")):
+        for c in gh_pages(path, gh):
             body = (c.get("body") or "").strip()
             if not body or body.startswith(AUTO_MARKERS):
                 continue
@@ -113,8 +127,14 @@ def fetch_decisions(n, gh=gh_json):
 
 # ---------- 归属 Hermes 会话 ----------
 
+def term_re(term):
+    """完整 token 匹配：前后不能紧贴字母数字/_/-，所以 pull/190 不中 pull/1901，branch-190 不中 branch-1900 / x-branch-190。"""
+    return re.compile(r"(?<![\w-])" + re.escape(term) + r"(?![\w-])")
+
+
 def resolve_owner(pr, db=None):
-    """merge 前在 Hermes 消息里提到该折分支名 / pull/N 次数最多的非 cron 会话；并列或为零 → None。"""
+    """merge 前在 Hermes 消息里提到该折分支名 / pull/N 次数最多的非 cron 会话；并列或为零 → None。
+    SQL LIKE 只做粗筛，计数以 Python 正则的完整 token 命中为准（按消息条数计）。"""
     db = db or HERMES_DB
     if not os.path.exists(db):
         return None, "hermes state.db 不存在"
@@ -124,12 +144,14 @@ def resolve_owner(pr, db=None):
     try:
         counts = {}
         for t in terms:
+            rx = term_re(t)
             rows = con.execute(
-                "SELECT m.session_id, count(*) FROM messages m JOIN sessions s ON s.id = m.session_id "
-                "WHERE s.source != 'cron' AND m.timestamp <= ? AND (m.content LIKE ? OR m.tool_calls LIKE ?) "
-                "GROUP BY m.session_id", (cutoff, f"%{t}%", f"%{t}%")).fetchall()
-            for sid, c in rows:
-                counts[sid] = counts.get(sid, 0) + c
+                "SELECT m.session_id, m.content, m.tool_calls FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE s.source != 'cron' AND m.timestamp <= ? AND (m.content LIKE ? OR m.tool_calls LIKE ?)",
+                (cutoff, f"%{t}%", f"%{t}%")).fetchall()
+            for sid, content, calls in rows:
+                if rx.search(content or "") or rx.search(calls or ""):
+                    counts[sid] = counts.get(sid, 0) + 1
     finally:
         con.close()
     if not counts:
@@ -161,13 +183,20 @@ def ledger():
             data.setdefault("jobs", {})
             data.setdefault("references", {})
             yield data
+            evs = data.pop("_events", [])
             tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
                 f.write("\n")
             os.replace(tmp, path)
+            for msg in evs:  # 台账落盘成功后才记事件；落盘失败则事件一条不写
+                event(msg)
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def queue_event(data, msg):
+    data.setdefault("_events", []).append(msg)
 
 
 def event(msg):
@@ -211,7 +240,7 @@ def ingest(data, pr, gh=gh_json, db=None):
             "labels_at_merge": labels, "detected_at": iso(now())}
     if kind_of(labels) in REFERENCE_KINDS:
         data["references"][k] = {**base, "note": "读物/参考：画可＝读毕，不生成执行单"}
-        event(f"reference {k}")
+        queue_event(data, f"reference {k}")
         return "new-reference"
     owner, why = resolve_owner(pr, db)
     data["jobs"][k] = {
@@ -226,7 +255,7 @@ def ingest(data, pr, gh=gh_json, db=None):
         "history": [{"at": iso(now()), "to": "pending", "by": "scan"}], "event_ids": [],
         "writeback": None,
     }
-    event(f"job {k} owner={owner}")
+    queue_event(data, f"job {k} owner={owner}")
     return "new-job"
 
 
@@ -237,11 +266,14 @@ def scan(since=None, gh=gh_json, db=None, writeback=False):
         start = since or ((cur - OVERLAP) if cur else t0 - BOOTSTRAP)
         prs = fetch_merged_since(start, gh)
         res = {"new-job": [], "new-reference": [], "dup": []}
+        new_keys = []
         for pr in sorted(prs, key=lambda p: p["merged_at"]):
-            res[ingest(data, pr, gh, db)].append(pr["number"])
+            st = ingest(data, pr, gh, db)
+            res[st].append(pr["number"])
+            if st == "new-job":  # 按 repo#PR@merge_sha 精确记，同 PR 旧 merge 的单不被连带回写
+                new_keys.append(key_of(pr))
         if not since:  # --since 是手动补扫，不动游标
             data["cursor"] = iso(t0)
-        new_keys = [k for k, j in data["jobs"].items() if j["pr"] in res["new-job"]]
     if writeback:
         for k in new_keys:
             sync(k, gh)
@@ -270,7 +302,11 @@ def transition(key, to, evidence=None, reason=None, event_id=None, by="hermes", 
             raise SystemExit("done 需要 --evidence")
         if to == "blocked" and not reason:
             raise SystemExit("blocked 需要 --reason")
-        if to == "executing" and not (extra.get("authorized_scope") or j["authorized_scope"]):
+        if extra.get("authorized_scope") is not None:
+            extra["authorized_scope"] = extra["authorized_scope"].strip()
+            if not extra["authorized_scope"]:
+                raise SystemExit("--scope 不能为空白")
+        if to == "executing" and not (extra.get("authorized_scope") or (j["authorized_scope"] or "").strip()):
             raise SystemExit("executing 需要 Hermes 读全文后给 --scope（merge 不是概括授权）")
         for k, v in extra.items():
             if v is not None:
@@ -283,7 +319,7 @@ def transition(key, to, evidence=None, reason=None, event_id=None, by="hermes", 
                              "evidence": evidence, "reason": reason})
         if event_id:
             j["event_ids"].append(event_id)
-        event(f"{key} -> {to}")
+        queue_event(data, f"{key} -> {to}")
         return dict(j), "ok"
 
 
@@ -298,24 +334,45 @@ def want_labels(state):
     return add, {"wait:你拍", "wait:你读", "wait:闲", "agent:blocked"} | ({"agent:claimed"} - add)
 
 
-def sync(key, gh=gh_json, edit=None):
+LABEL_COLORS = {"wait:agent": "c5def5", "agent:claimed": "0e8a16", "agent:blocked": "b60205", "wait:你拍": "fbca04"}
+
+
+def run_cmd(cmd):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+
+
+def ensure_labels(names, gh=None, edit=None):
+    """回写前确认 label 在仓里存在（gh api 只读列全量）；缺的用 gh label create 补，返回补建的名字。"""
+    gh = gh or gh_json
+    have = {l["name"] for l in gh_pages(f"repos/{REPO}/labels", gh)}
+    missing = sorted(set(names) - have)
+    for name in missing:
+        (edit or run_cmd)(["gh", "label", "create", name, "-R", REPO, "--color", LABEL_COLORS.get(name, "ededed"),
+                           "--description", "menxia approvals 台账回写"])
+    return missing
+
+
+def sync(key, gh=None, edit=None):
+    gh = gh or gh_json
     with ledger() as data:
         j = dict(data["jobs"][key])
     add, rm = want_labels(j["state"])
     cur = set(labels_of(gh(f"repos/{REPO}/pulls/{j['pr']}")))
     to_add, to_rm = sorted(add - cur), sorted(rm & cur)
+    if to_add:
+        ensure_labels(to_add, gh, edit)
     if to_add or to_rm:
         cmd = ["gh", "pr", "edit", str(j["pr"]), "-R", REPO]
         for l in to_add:
             cmd += ["--add-label", l]
         for l in to_rm:
             cmd += ["--remove-label", l]
-        (edit or (lambda c: subprocess.run(c, check=True, capture_output=True, text=True, timeout=60)))(cmd)
+        (edit or run_cmd)(cmd)
     after = sorted(labels_of(gh(f"repos/{REPO}/pulls/{j['pr']}")))
     ok = add <= set(after) and not (rm & set(after))
     with ledger() as data:
         data["jobs"][key]["writeback"] = {"at": iso(now()), "state": j["state"], "labels": after, "verified": ok}
-    event(f"sync {key} state={j['state']} labels={after} verified={ok}")
+        queue_event(data, f"sync {key} state={j['state']} labels={after} verified={ok}")
     return {"key": key, "state": j["state"], "added": to_add, "removed": to_rm, "labels_readback": after,
             "verified": ok}
 
@@ -383,14 +440,24 @@ def main(argv=None):
         with ledger() as data:
             data["jobs"][a.key]["owner_session"] = a.owner_session
             data["jobs"][a.key]["owner_reason"] = "Hermes 手动指定"
-        event(f"{a.key} owner={a.owner_session}")
+            queue_event(data, f"{a.key} owner={a.owner_session}")
     elif a.cmd == "sync":
         print(json.dumps(sync(a.key), ensure_ascii=False))
 
 
-if __name__ == "__main__":
+def cli(argv=None):
     try:
-        main()
+        main(argv)
     except RuntimeError as e:  # gh 失败：不动游标，下一轮自然补扫
         print(f"approvals FAIL: {e}", file=sys.stderr)
-        sys.exit(1)
+        return 1
+    except subprocess.CalledProcessError as e:  # gh label create / gh pr edit 写失败：台账状态已落，label 未回写
+        err = (e.stderr or "").strip()[:300] if isinstance(e.stderr, str) else ""
+        print(f"approvals WRITEBACK FAIL: {' '.join(map(str, e.cmd))} rc={e.returncode}: {err}；"
+              f"台账已更新但门下 label 未回写，修好后跑 `approvals.py sync --key K` 补", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

@@ -5,6 +5,7 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -25,6 +26,8 @@ class FakeGH:
     def __init__(self, prs, comments=None):
         self.prs, self.comments, self.fail, self.calls = prs, comments or {}, False, []
         self.labels = {}
+        self.repo_labels = {"wait:你拍", "wait:你读", "kind:设计", "wait:agent"}  # 缺 agent:claimed / agent:blocked
+        self.created = []
 
     def __call__(self, path):
         self.calls.append(path)
@@ -34,18 +37,28 @@ class FakeGH:
             page = int(path.rsplit("page=", 1)[1])
             items = sorted(self.prs, key=lambda p: p["updated_at"], reverse=True)
             return items[(page - 1) * 50: page * 50]
-        if "/issues/" in path and path.endswith("per_page=100"):
-            return self.comments.get(int(path.split("/issues/")[1].split("/")[0]), [])
+        page = int(path.rsplit("page=", 1)[1]) if "page=" in path else 1
+        if path.startswith(f"repos/{R}/labels?"):
+            return [{"name": l} for l in sorted(self.repo_labels)][(page - 1) * 100: page * 100]
+        if "/issues/" in path and "/comments" in path:
+            items = self.comments.get(int(path.split("/issues/")[1].split("/")[0]), [])
+            return items[(page - 1) * 100: page * 100]
         if "/comments" in path:
             return []
         n = int(path.rsplit("/", 1)[1])
         return {"labels": [{"name": l} for l in sorted(self.labels.get(n, {"wait:你拍", "kind:设计"}))]}
 
     def edit(self, cmd):
+        if cmd[1] == "label":  # gh label create NAME
+            self.repo_labels.add(cmd[3])
+            self.created.append(cmd[3])
+            return
         n = int(cmd[3])
         cur = set(self.labels.get(n, {"wait:你拍", "kind:设计"}))
         for i, c in enumerate(cmd):
             if c == "--add-label":
+                if cmd[i + 1] not in self.repo_labels:  # 真 gh：label 不存在就失败
+                    raise subprocess.CalledProcessError(1, cmd, stderr=f"'{cmd[i + 1]}' not found")
                 cur.add(cmd[i + 1])
             if c == "--remove-label":
                 cur.discard(cmd[i + 1])
@@ -202,6 +215,95 @@ class TestTransitions(Base):
         r = A.sync(self.key, gh=self.gh, edit=self.gh.edit)
         self.assertEqual(r["labels_readback"], ["kind:设计"])
         self.assertTrue(r["verified"])
+        self.assertEqual(sorted(self.gh.created), ["agent:blocked", "agent:claimed"])
+
+    def test_missing_label_is_created_before_edit(self):
+        A.transition(self.key, "executing", authorized_scope="s")
+        A.sync(self.key, gh=self.gh, edit=self.gh.edit)
+        self.assertEqual(self.gh.created, ["agent:claimed"])
+        self.assertTrue(any(p.startswith(f"repos/{R}/labels?") for p in self.gh.calls))  # 先只读查过
+        A.transition(self.key, "verifying")
+        A.sync(self.key, gh=self.gh, edit=self.gh.edit)
+        self.assertEqual(self.gh.created, ["agent:claimed"])  # 已存在不重复建
+
+    def test_cli_writeback_failure_is_clear_error_not_crash(self):
+        def boom(cmd):
+            raise subprocess.CalledProcessError(1, cmd, stderr="HTTP 403 FIXTURE")
+        old = (A.gh_json, A.run_cmd)
+        A.gh_json, A.run_cmd = self.gh, boom
+        try:
+            rc = A.cli(["claim", "--key", self.key, "--owner-session", "o", "--task-id", "t", "--scope", "s",
+                        "--writeback"])
+        finally:
+            A.gh_json, A.run_cmd = old
+        self.assertEqual(rc, 2)
+        self.assertEqual(self.jobs()["jobs"][self.key]["state"], "executing")  # 台账已落，label 待补
+
+    def test_blank_scope_rejected(self):
+        for s in ("", "   ", "\n\t"):
+            with self.assertRaises(SystemExit):
+                A.transition(self.key, "executing", authorized_scope=s)
+        self.assertEqual(self.jobs()["jobs"][self.key]["state"], "pending")
+        j, _ = A.transition(self.key, "executing", authorized_scope="  仅期0  ")
+        self.assertEqual(j["authorized_scope"], "仅期0")
+
+    def test_event_logged_only_after_ledger_commit(self):
+        _, path = A.paths()
+
+        def ev():
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        before = ev()
+        real = A.os.replace
+
+        def fail(*a):
+            raise OSError("FIXTURE disk full")
+        A.os.replace = fail
+        try:
+            with self.assertRaises(OSError):
+                A.transition(self.key, "blocked", reason="r")
+        finally:
+            A.os.replace = real
+        self.assertEqual(ev(), before)
+        self.assertEqual(self.jobs()["jobs"][self.key]["state"], "pending")
+        A.transition(self.key, "blocked", reason="r")
+        self.assertIn("-> blocked", ev())
+
+
+class TestFixes(Base):
+    def test_owner_needs_full_token(self):
+        con = sqlite3.connect(self.db)
+        t = dt.datetime(2026, 10, 24, 10, tzinfo=dt.timezone.utc).timestamp()
+        con.executemany("insert into sessions values (?,?)", [("decoy", "desktop"), ("real", "desktop")])
+        con.executemany("insert into messages (session_id, content, tool_calls, timestamp) values (?,?,?,?)", [
+            ("decoy", "menxia-mac-plan 草稿", None, t), ("decoy", "x-menxia-mac 旧分支", None, t),
+            ("decoy", "见 review/pull/1901", None, t), ("decoy", "review/pull/1902", None, t),
+            ("real", "push origin/menxia-mac 完", None, t), ("real", None, '{"url":"review/pull/190."}', t),
+        ])
+        con.commit()
+        con.close()
+        A.scan(gh=FakeGH([pr(190, "2026-10-24T20:00:00Z", ref="menxia-mac")]))
+        j = next(iter(self.jobs()["jobs"].values()))
+        self.assertEqual(j["owner_session"], "real")
+        self.assertNotIn("decoy", j["owner_reason"])
+
+    def test_comments_paginated(self):
+        cs = [{"id": i, "created_at": f"2026-10-24T19:{i // 60:02d}:{i % 60:02d}Z", "body": f"判 {i}"} for i in range(150)]
+        A.scan(gh=FakeGH([pr(190, "2026-10-24T20:21:55Z")], {190: cs}))
+        j = next(iter(self.jobs()["jobs"].values()))
+        self.assertEqual(len(j["decisions"]), 150)
+
+    def test_scan_writeback_matches_merge_sha(self):
+        A.scan(gh=FakeGH([pr(190, "2026-10-24T20:21:55Z")]))
+        self.clock += dt.timedelta(minutes=5)
+        synced, real = [], A.sync
+        A.sync = lambda k, gh=None, edit=None: synced.append(k)
+        try:
+            A.scan(gh=FakeGH([pr(190, "2026-10-24T20:21:55Z"), pr(190, "2026-10-24T20:33:00Z", sha="f" * 40)]),
+                   writeback=True)
+        finally:
+            A.sync = real
+        self.assertEqual(synced, [f"{R}#190@{'f' * 40}"])
 
 
 if __name__ == "__main__":
