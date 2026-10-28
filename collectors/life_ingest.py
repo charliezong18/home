@@ -59,7 +59,19 @@ def load_life():
     return items, (rows[-1].get("ts") if rows else None)
 
 
+def auto_id(e):
+    """缺 id 时按 source+title+date 生成稳定 id（worker 无法自己算哈希）。"""
+    import hashlib
+    pre = {"calendar": "cal"}.get(e.get("source"), "")
+    if not pre and e.get("source") == "gmail":
+        pre = "bill" if "账单" in str(e.get("title", "")) else "parcel"
+    h = hashlib.sha1(f"{e.get('source')}|{e.get('title')}|{e.get('date')}".encode()).hexdigest()[:8]
+    return f"d:{pre}-{h}"
+
+
 def validate(e):
+    if isinstance(e, dict) and not e.get("id"):
+        e = {**e, "id": auto_id(e)}
     """返回规整后的条目；不合格抛 ValueError（消息给 cron 会话看）。"""
     if not isinstance(e, dict):
         raise ValueError("条目必须是对象")
