@@ -1,0 +1,383 @@
+#!/usr/bin/env python3
+"""dibao：Mac mini 本地服务（#187 A 期）。标准库 HTTP，只绑 127.0.0.1。
+
+真源 = 本地 home-data 工作树（common.DATA_DIR）。本进程是本机唯一写者：
+  · 每 sync_down_secs 秒 git pull --rebase → 发现 pending 编辑 → 子进程落卡 → 重算 home.json
+  · POST /v1/edits 等本机调用：追加账本 → 立刻落卡 → 重算
+  · 本地提交后 push_debounce_secs 防抖，再 push 回 GitHub
+用法：dibao.py [--no-push] [--once-sync] [--selftest]；端口 DIBAO_PORT / config.toml（缺省 8766）。
+"""
+import argparse
+import hashlib
+import json
+import logging
+import logging.handlers
+import os
+import re
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "collectors"))
+
+import add_link  # noqa: E402
+import apply  # noqa: E402
+import apply_edits  # noqa: E402
+import build_home  # noqa: E402
+import config  # noqa: E402
+import ledger  # noqa: E402
+from common import BRANCH, DATA_DIR, data_lock, git, now_iso, read_json, sync_down  # noqa: E402
+
+VERSION = "0.1.0"
+EDITS = os.path.join(DATA_DIR, "edits.jsonl")
+READINGS = os.path.join(DATA_DIR, "readings.jsonl")
+HOME_JSON = os.path.join(DATA_DIR, "home.json")
+STATUS_JSON = os.path.join(DATA_DIR, "status.json")
+MAX_BODY = 64 * 1024
+log = logging.getLogger("dibao")
+
+
+class Service:
+    def __init__(self, cfg, push=True):
+        self.cfg, self.push = cfg, push
+        self.started = time.time()
+        self.svc = threading.RLock()            # 本进程内所有写操作串行；data_lock 只在单步 git/文件操作里短持
+        self.push_evt, self.stop = threading.Event(), threading.Event()
+        self.last_sync_down = self.last_push = None
+        # build_home 直接 import 复用，但它的 sync_down / commit_and_push 换成本服务的（只本地提交，push 走防抖线程）
+        build_home.sync_down = lambda: None
+        build_home.commit_and_push = self._commit
+
+    # ---------- git ----------
+    def _head(self):
+        return git("rev-parse", "HEAD", check=False).stdout.strip()
+
+    def _commit(self, paths, message):
+        """调用方已持 data_lock（build_home.main 自带；本服务其余路径显式持）。"""
+        git("add", "--", *paths)
+        if git("diff", "--cached", "--quiet", check=False).returncode == 0:
+            return False
+        git("commit", "--quiet", "-m", message)
+        self.push_evt.set()
+        return True
+
+    def prepare_repo(self):
+        """让 pull --rebase 在两边都追加 jsonl 末尾时不冲突（union），生成物冲突取本地（马上重算）。"""
+        info = os.path.join(DATA_DIR, ".git", "info")
+        if os.path.isdir(info):
+            with open(os.path.join(info, "attributes"), "w") as f:
+                f.write("*.jsonl merge=union\nhome.json merge=ours\nstatus.json merge=ours\n")
+            git("config", "merge.ours.driver", "true", check=False)
+
+    # ---------- 落卡 + 重算 ----------
+    def rebuild(self):
+        build_home.main()
+
+    def process_pending(self):
+        """落所有 pending 编辑。返回 {id: 状态行}；超时/worker 异常返回 None（账本不动，下轮再试）。"""
+        with data_lock():
+            pending = ledger.pending_edits(ledger.read_ledger(EDITS))
+        if not pending:
+            return {}
+        results = apply.run_worker(self.cfg.worker_cmd, pending, self.cfg.worker_timeout, log.warning)
+        if results is None:
+            return None
+        ts, lines = now_iso(), {}
+        for x in results:
+            line = {"id": x["id"], "state": x["state"], "ts": ts}
+            for k in ("summary", "error"):
+                if x.get(k):
+                    line[k] = x[k]
+            lines[x["id"]] = line
+            log.info("edit %s → %s %s", x["id"], x["state"], x.get("summary") or x.get("error") or "")
+        with data_lock():
+            for line in lines.values():
+                ledger.append(EDITS, line)
+            self._commit(["edits.jsonl"], f"edits: apply {len(lines)}")
+        if any(x.get("changed") for x in results):
+            apply.recollect(self.cfg.recollect_cmd, self.cfg.worker_timeout, log.warning)
+        self.rebuild()
+        return lines
+
+    def sync_cycle(self):
+        with self.svc:
+            with data_lock():
+                if git("status", "--porcelain").stdout.strip():
+                    log.error("home-data 工作树不干净，本轮不拉")
+                    return
+                before = self._head()
+                try:
+                    sync_down()
+                except Exception as e:  # noqa: BLE001 — 断网不拖垮循环
+                    log.warning("sync_down 失败：%s", str(e)[:200])
+                after = self._head()
+            self.last_sync_down = now_iso()
+            done = self.process_pending()
+            if after != before and not done:
+                self.rebuild()
+            if self.push and git("rev-list", "--count", f"origin/{BRANCH}..HEAD", check=False).stdout.strip() not in ("", "0"):
+                self.push_evt.set()
+
+    def do_push(self):
+        with data_lock():
+            r = git("push", "--quiet", "origin", f"HEAD:{BRANCH}", timeout=90, check=False)
+        if r.returncode == 0:
+            self.last_push = now_iso()
+        else:
+            log.warning("push 失败（下个同步周期 pull 后重试）：%s", r.stderr.strip()[:200])
+
+    # ---------- 后台线程 ----------
+    def start_threads(self):
+        def sync_loop():
+            while not self.stop.wait(self.cfg.sync_down_secs):
+                try:
+                    self.sync_cycle()
+                except Exception:  # noqa: BLE001
+                    log.exception("sync_cycle 异常")
+
+        def push_loop():
+            while not self.stop.is_set():
+                if not self.push_evt.wait(1):
+                    continue
+                if self.stop.wait(self.cfg.push_debounce_secs):
+                    return
+                self.push_evt.clear()
+                try:
+                    self.do_push()
+                except Exception:  # noqa: BLE001
+                    log.exception("push 异常")
+
+        threading.Thread(target=sync_loop, name="sync", daemon=True).start()
+        if self.push:
+            threading.Thread(target=push_loop, name="push", daemon=True).start()
+
+    # ---------- 业务 ----------
+    def project(self, target):
+        home = read_json(HOME_JSON, {}) or {}
+        return next((p for p in home.get("projects", []) if p.get("id") == target), None)
+
+    def post_edit(self, body):
+        ts = now_iso()
+        e = ledger.normalize_edit(body, ts)
+        err = apply_edits.validate(e)
+        if err:
+            raise ValueError(err)
+        with self.svc:
+            with data_lock():
+                cur = ledger.read_ledger(EDITS).get(e["id"])
+                if not cur:
+                    ledger.append(EDITS, e)
+                    self._commit(["edits.jsonl"], f"edits: + {e['id']}")
+            if cur and cur.get("state") != "pending":
+                return 200, self._edit_resp(cur)
+            lines = self.process_pending()
+        if lines is None or e["id"] not in lines:
+            return 202, {"edit": {"id": e["id"], "state": "pending"}}
+        return 200, self._edit_resp({**e, **lines[e["id"]]})
+
+    def _edit_resp(self, rec):
+        edit = {k: rec[k] for k in ("id", "state", "summary", "error") if rec.get(k)}
+        home = read_json(HOME_JSON, {}) or {}
+        return {"edit": edit, "project": self.project(rec.get("target")), "generated": home.get("generated")}
+
+    def post_reading(self, body):
+        url = str((body or {}).get("url", "")).strip()
+        if not re.match(r"^https?://", url):
+            raise ValueError("url 必须是 http(s)")
+        why = str(body.get("why", "")).strip()
+        with data_lock():
+            for r in ledger.read_ledger(READINGS).values():
+                if r.get("url") == url:
+                    return 200, r
+        title, _ = fetch_title(url)                       # 10 s 超时，不持锁
+        entry = add_link.build_entry(url, why, title)
+        with self.svc:
+            with data_lock():
+                ledger.append(READINGS, entry)
+                self._commit(["readings.jsonl"], f"readings: + {title[:60]}")
+            self.rebuild()
+        return 201, entry
+
+    def patch_reading(self, key, body):
+        status = (body or {}).get("status")
+        if status not in ledger.READING_STATUS:
+            raise ValueError(f"status 必须是 {sorted(ledger.READING_STATUS)}")
+        with self.svc:
+            with data_lock():
+                rec = ledger.find_reading(ledger.read_ledger(READINGS), key)
+                if not rec:
+                    return 404, {"error": f"没有这条读物 {key}"}
+                ledger.append(READINGS, {"id": rec["id"], "status": status, "ts": now_iso()})
+                self._commit(["readings.jsonl"], f"readings: {rec['id']} → {status}")
+            self.rebuild()
+        return 200, {"id": rec["id"], "status": status}
+
+    def notes_pending(self):
+        with data_lock():
+            return ledger.notes_pending(ledger.read_ledger(EDITS))
+
+    def note_done(self, eid, body):
+        with self.svc:
+            with data_lock():
+                rec = ledger.read_ledger(EDITS).get(eid)
+                if not rec:
+                    return 404, {"error": f"没有这条编辑 {eid}"}
+                if rec.get("state") != "done":
+                    line = {"id": eid, "state": "done", "ts": now_iso()}
+                    if (body or {}).get("result"):
+                        line["result"] = str(body["result"])
+                    ledger.append(EDITS, line)
+                    self._commit(["edits.jsonl"], f"edits: done {eid}")
+            self.rebuild()
+        return 200, {"id": eid, "state": "done"}
+
+    def health(self):
+        with data_lock():
+            pending = len(ledger.pending_edits(ledger.read_ledger(EDITS)))
+        try:
+            import collect_dashboard as cd
+            vault_ok = os.path.isdir(cd.VAULT_DASH)
+        except Exception:  # noqa: BLE001
+            vault_ok = False
+        return {"ok": True, "uptime_s": int(time.time() - self.started), "last_sync_down": self.last_sync_down,
+                "last_push": self.last_push, "pending_edits": pending, "vault_ok": vault_ok, "version": VERSION}
+
+
+fetch_title = add_link.fetch_title   # 测试可替换，避免真联网
+
+
+def file_response(path):
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None, None
+    return raw, '"' + hashlib.sha256(raw).hexdigest()[:16] + '"'
+
+
+def make_handler(svc):
+    class H(BaseHTTPRequestHandler):
+        server_version = "dibao/" + VERSION
+
+        def log_message(self, fmt, *args):
+            log.info("%s %s", self.address_string(), fmt % args)
+
+        def _send(self, code, obj=None, raw=None, headers=None):
+            body = raw if raw is not None else json.dumps(obj, ensure_ascii=False).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            for k, v in (headers or {}).items():
+                self.send_header(k, v)
+            self.end_headers()
+            if code != 304:
+                self.wfile.write(body)
+
+        def _body(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_BODY:
+                raise ValueError("body 过大")
+            if not n:
+                return {}
+            try:
+                return json.loads(self.rfile.read(n))
+            except ValueError:
+                raise ValueError("body 不是合法 JSON")
+
+        def _dispatch(self, method):
+            host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+            if host not in ("127.0.0.1", "localhost", "[::1]"):
+                return self._send(421, {"error": "只服务 127.0.0.1"})
+            path = self.path.split("?", 1)[0]
+            try:
+                if method == "GET" and path == "/health":
+                    return self._send(200, svc.health())
+                if method == "GET" and path in ("/v1/home.json", "/v1/status.json"):
+                    raw, etag = file_response(HOME_JSON if path == "/v1/home.json" else STATUS_JSON)
+                    if raw is None:
+                        return self._send(404, {"error": "还没有该文件"})
+                    if self.headers.get("If-None-Match") == etag:
+                        return self._send(304, raw=b"", headers={"ETag": etag})
+                    return self._send(200, raw=raw, headers={"ETag": etag})
+                if method == "GET" and path == "/v1/notes/pending":
+                    return self._send(200, svc.notes_pending())
+                if method == "POST" and path == "/v1/edits":
+                    return self._send(*svc.post_edit(self._body()))
+                if method == "POST" and path == "/v1/readings":
+                    return self._send(*svc.post_reading(self._body()))
+                if method == "PATCH" and (m := re.fullmatch(r"/v1/readings/([^/]+)", path)):
+                    return self._send(*svc.patch_reading(m.group(1), self._body()))
+                if method == "POST" and (m := re.fullmatch(r"/v1/notes/([^/]+)/done", path)):
+                    return self._send(*svc.note_done(m.group(1), self._body()))
+                if method == "POST" and path == "/v1/collect":
+                    return self._send(501, {"error": "WP-09b"})
+                return self._send(404, {"error": "没有这个路由"})
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            except Exception as e:  # noqa: BLE001
+                log.exception("处理 %s %s 出错", method, path)
+                return self._send(500, {"error": str(e)[:200]})
+
+        def do_GET(self):
+            self._dispatch("GET")
+
+        def do_POST(self):
+            self._dispatch("POST")
+
+        def do_PATCH(self):
+            self._dispatch("PATCH")
+
+    return H
+
+
+def setup_logging(cfg):
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    if cfg.log_file:
+        os.makedirs(os.path.dirname(cfg.log_file), exist_ok=True)
+        h = logging.handlers.RotatingFileHandler(cfg.log_file, maxBytes=1 << 20, backupCount=3, encoding="utf-8")
+    else:
+        h = logging.StreamHandler()
+    h.setFormatter(fmt)
+    log.addHandler(h)
+    log.setLevel(logging.INFO)
+
+
+def make_server(svc, port=None):
+    return ThreadingHTTPServer(("127.0.0.1", port if port is not None else svc.cfg.port), make_handler(svc))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--no-push", action="store_true", help="不 push（演练 / 测试）")
+    ap.add_argument("--once-sync", action="store_true", help="启动时先同步一轮再开始服务")
+    ap.add_argument("--selftest", action="store_true", help="起服务、请求一次 /health、打印后退出")
+    a = ap.parse_args()
+    cfg = config.load()
+    setup_logging(cfg)
+    svc = Service(cfg, push=not a.no_push)
+    svc.prepare_repo()
+    srv = make_server(svc)               # bind 失败直接抛，launchd 会按 ThrottleInterval 重启
+    log.info("dibao %s 监听 127.0.0.1:%s data=%s push=%s", VERSION, cfg.port, DATA_DIR, svc.push)
+    if a.once_sync:
+        svc.sync_cycle()
+    if a.selftest:
+        import urllib.request
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        print(urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/health").read().decode())
+        srv.shutdown()
+        return 0
+    svc.start_threads()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        svc.stop.set()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -38,14 +38,9 @@ def fetch_title(url):
     return url, False
 
 
-def main():
-    if len(sys.argv) < 2 or not re.match(r"^https?://", sys.argv[1]):
-        print("FAIL 用法：add_link.py <http(s) url> [附言]")
-        return 2
-    url = sys.argv[1].strip()
-    note = " ".join(sys.argv[2:]).strip()
-    title, got = fetch_title(url)
-    entry = {
+def build_entry(url, note, title):
+    """readings.jsonl 一行（CLI 与 dibao 服务共用）。"""
+    return {
         "id": f"link-{today_local().replace('-', '')}-{hashlib.sha1(url.encode()).hexdigest()[:4]}",
         "title": title,
         "url": url,
@@ -55,6 +50,16 @@ def main():
         "status": "new",
         "ts": now_iso(),
     }
+
+
+def main():
+    if len(sys.argv) < 2 or not re.match(r"^https?://", sys.argv[1]):
+        print("FAIL 用法：add_link.py <http(s) url> [附言]")
+        return 2
+    url = sys.argv[1].strip()
+    note = " ".join(sys.argv[2:]).strip()
+    title, got = fetch_title(url)
+    entry = build_entry(url, note, title)
     try:
         with data_lock():
             sync_down()
