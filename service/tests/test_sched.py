@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _env  # noqa: E402,F401
 import config  # noqa: E402
 import dibao  # noqa: E402
-import sched  # noqa: E402
+import dibao_sched as sched  # noqa: E402  (renamed: avoid shadowing stdlib sched)
 from test_http import req  # noqa: E402
 
 

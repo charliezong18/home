@@ -29,7 +29,7 @@ import apply_edits  # noqa: E402
 import build_home  # noqa: E402
 import config  # noqa: E402
 import ledger  # noqa: E402
-import sched  # noqa: E402
+import dibao_sched as sched  # noqa: E402  (renamed: avoid shadowing stdlib sched)
 from common import BRANCH, DATA_DIR, data_lock, git, now_iso, read_json, sync_down  # noqa: E402
 
 VERSION = "0.1.0"
