@@ -29,6 +29,7 @@ import apply_edits  # noqa: E402
 import build_home  # noqa: E402
 import config  # noqa: E402
 import ledger  # noqa: E402
+import sched  # noqa: E402
 from common import BRANCH, DATA_DIR, data_lock, git, now_iso, read_json, sync_down  # noqa: E402
 
 VERSION = "0.1.0"
@@ -45,8 +46,10 @@ class Service:
         self.cfg, self.push = cfg, push
         self.started = time.time()
         self.svc = threading.RLock()            # 本进程内所有写操作串行；data_lock 只在单步 git/文件操作里短持
-        self.push_evt, self.stop = threading.Event(), threading.Event()
+        self.stop = threading.Event()
         self.last_sync_down = self.last_push = None
+        self.pusher = sched.Pusher(self.do_push, cfg.push_debounce_secs)
+        self.sched = sched.Scheduler(self)
         # build_home 直接 import 复用，但它的 sync_down / commit_and_push 换成本服务的（只本地提交，push 走防抖线程）
         build_home.sync_down = lambda: None
         build_home.commit_and_push = self._commit
@@ -61,7 +64,8 @@ class Service:
         if git("diff", "--cached", "--quiet", check=False).returncode == 0:
             return False
         git("commit", "--quiet", "-m", message)
-        self.push_evt.set()
+        if self.push:
+            self.pusher.mark()
         return True
 
     def prepare_repo(self):
@@ -74,7 +78,7 @@ class Service:
 
     # ---------- 落卡 + 重算 ----------
     def rebuild(self):
-        build_home.main()
+        return build_home.main()
 
     def process_pending(self):
         """落所有 pending 编辑。返回 {id: 状态行}；超时/worker 异常返回 None（账本不动，下轮再试）。"""
@@ -119,15 +123,16 @@ class Service:
             if after != before and not done:
                 self.rebuild()
             if self.push and git("rev-list", "--count", f"origin/{BRANCH}..HEAD", check=False).stdout.strip() not in ("", "0"):
-                self.push_evt.set()
+                self.pusher.mark()
 
     def do_push(self):
         with data_lock():
             r = git("push", "--quiet", "origin", f"HEAD:{BRANCH}", timeout=90, check=False)
         if r.returncode == 0:
             self.last_push = now_iso()
-        else:
-            log.warning("push 失败（下个同步周期 pull 后重试）：%s", r.stderr.strip()[:200])
+            return True
+        log.warning("push 失败（防抖线程会重试）：%s", r.stderr.strip()[:200])
+        return False
 
     # ---------- 后台线程 ----------
     def start_threads(self):
@@ -138,21 +143,10 @@ class Service:
                 except Exception:  # noqa: BLE001
                     log.exception("sync_cycle 异常")
 
-        def push_loop():
-            while not self.stop.is_set():
-                if not self.push_evt.wait(1):
-                    continue
-                if self.stop.wait(self.cfg.push_debounce_secs):
-                    return
-                self.push_evt.clear()
-                try:
-                    self.do_push()
-                except Exception:  # noqa: BLE001
-                    log.exception("push 异常")
-
         threading.Thread(target=sync_loop, name="sync", daemon=True).start()
+        threading.Thread(target=self.sched.loop, args=(self.stop, self.cfg.collect_secs), name="collect", daemon=True).start()
         if self.push:
-            threading.Thread(target=push_loop, name="push", daemon=True).start()
+            threading.Thread(target=self.pusher.loop, args=(self.stop,), name="push", daemon=True).start()
 
     # ---------- 业务 ----------
     def project(self, target):
@@ -243,7 +237,19 @@ class Service:
         except Exception:  # noqa: BLE001
             vault_ok = False
         return {"ok": True, "uptime_s": int(time.time() - self.started), "last_sync_down": self.last_sync_down,
-                "last_push": self.last_push, "pending_edits": pending, "vault_ok": vault_ok, "version": VERSION}
+                "last_push": self.last_push, "pending_edits": pending, "vault_ok": vault_ok, "version": VERSION,
+                "last_collect": self.sched.last_collect, "collect_failures": self.sched.collect_failures,
+                "push_failures": self.pusher.failures}
+
+    def start_collect(self, body):
+        srcs = (body or {}).get("sources")
+        if srcs is not None and not isinstance(srcs, list):
+            raise ValueError("sources 必须是数组")
+        return 202, {"job": self.sched.start_job(srcs or None)["id"]}
+
+    def get_collect(self, jid):
+        job = self.sched.get_job(jid)
+        return (200, job) if job else (404, {"error": f"没有这个 job {jid}"})
 
 
 fetch_title = add_link.fetch_title   # 测试可替换，避免真联网
@@ -313,7 +319,9 @@ def make_handler(svc):
                 if method == "POST" and (m := re.fullmatch(r"/v1/notes/([^/]+)/done", path)):
                     return self._send(*svc.note_done(m.group(1), self._body()))
                 if method == "POST" and path == "/v1/collect":
-                    return self._send(501, {"error": "WP-09b"})
+                    return self._send(*svc.start_collect(self._body()))
+                if method == "GET" and (m := re.fullmatch(r"/v1/collect/([^/]+)", path)):
+                    return self._send(*svc.get_collect(m.group(1)))
                 return self._send(404, {"error": "没有这个路由"})
             except ValueError as e:
                 return self._send(400, {"error": str(e)})
@@ -343,6 +351,14 @@ def setup_logging(cfg):
     h.setFormatter(fmt)
     log.addHandler(h)
     log.setLevel(logging.INFO)
+    slog = logging.getLogger("dibao.sched")       # 调度日志单独成文件：同目录 sched.log，轮转同 api.log
+    if cfg.log_file:
+        sh = logging.handlers.RotatingFileHandler(os.path.join(os.path.dirname(cfg.log_file), "sched.log"),
+                                                  maxBytes=1 << 20, backupCount=3, encoding="utf-8")
+        sh.setFormatter(fmt)
+        slog.addHandler(sh)
+        slog.propagate = False
+    slog.setLevel(logging.INFO)
 
 
 def make_server(svc, port=None):
@@ -354,8 +370,11 @@ def main():
     ap.add_argument("--no-push", action="store_true", help="不 push（演练 / 测试）")
     ap.add_argument("--once-sync", action="store_true", help="启动时先同步一轮再开始服务")
     ap.add_argument("--selftest", action="store_true", help="起服务、请求一次 /health、打印后退出")
+    ap.add_argument("--collect-secs", type=int, help="覆盖采集间隔（秒，演练用）")
     a = ap.parse_args()
     cfg = config.load()
+    if a.collect_secs:
+        cfg.collect_secs = a.collect_secs
     setup_logging(cfg)
     svc = Service(cfg, push=not a.no_push)
     svc.prepare_repo()
