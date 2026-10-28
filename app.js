@@ -301,10 +301,10 @@ function render(data) {
     const dated = Number.isFinite(p.days);
     const title = p.proj ? `${p.icon || ''} ${p.title}`.trim() : p.title;
     const href = p.proj ? null : safeUrl(p.url);
-    return h('li', { class: dated && p.days < 0 ? 'over' : dated && p.days <= 3 ? 'soon' : '' },
+    return h('li', { class: dated && p.days < 0 ? 'over' : dated && p.days <= 3 ? 'soon' : '', 'data-id': p.id },
       h('span', { class: 'd' }, dated ? md(p.date) : '待定'),
       h('span', { class: 't' }, p.proj ? null : h('span', { class: 'si', 'aria-hidden': 'true' }, p.recur ? null : `${DUE_ICON[p.source] || '📅'} `),
-        href ? h('a', { href }, title) : title, h('span', { class: 'm' }, [dated ? dueText(p.days) : '', p.note].filter(Boolean).join(' · '), ' ', idBtn(p.id))));
+        href ? h('a', { href }, title) : title, h('span', { class: 'm' }, [dated ? dueText(p.days) : '', p.note].filter(Boolean).join(' · '))));
   })
     : [h('li', { class: 'empty' }, `${DUE_DAYS} 天内没有到期的事。`)]),
   ...(due.length > CAP.due ? [h('li', { class: 'empty' }, `还有 ${due.length - CAP.due} 件 · 见 Obsidian Dashboard / Backlog`)] : []));
@@ -316,9 +316,9 @@ function render(data) {
     const title = x.kind === 'project'
       ? h('button', { type: 'button', class: 'lnk', onclick: () => openProject(x.p), 'aria-label': `${x.title}，已过期 ${-x.days} 天，打开详情` }, x.title)
       : (href ? h('a', { href }, x.title) : x.title);
-    return h('li', { class: 'over' },
+    return h('li', { class: 'over', 'data-id': x.id },
       h('span', { class: 'd' }, md(x.deadline)),
-      h('span', { class: 't' }, title, h('span', { class: 'm' }, [`已过 ${-x.days} 天`, x.note].filter(Boolean).join(' · '), ' ', idBtn(x.id))));
+      h('span', { class: 't' }, title, h('span', { class: 'm' }, [`已过 ${-x.days} 天`, x.note].filter(Boolean).join(' · '))));
   })
     : [h('li', { class: 'empty' }, '没有过期待处理的事。')]),
   ...(overdueItems.length > CAP.overdue ? [h('li', { class: 'empty' }, `还有 ${overdueItems.length - CAP.overdue} 件 · 见 Obsidian Dashboard`)] : []));
