@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """采集器 #1：门下折务 + 弘文馆。gh api 读 review 仓 open PR 与 labels，写本地快照。"""
 import json
+import re
 import sys
 
 from common import REPO, die, log, run, save_snapshot
 
-OLDEST_N = 8
+OLDEST_N = 20
+DUE_PREFIX = "due:"
+DUE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DESK = "https://menxia-reader.github.io/menxia/?pr={n}"
 WAITS = ["你拍", "你读", "agent", "闲"]
 
@@ -14,26 +17,36 @@ def label_values(labels, prefix):
     return [l["name"][len(prefix):] for l in labels if l["name"].startswith(prefix)]
 
 
+def folder_item(p):
+    labels = p.get("labels", [])
+    waits = label_values(labels, "wait:")
+    dues = []
+    for v in label_values(labels, DUE_PREFIX):
+        if DUE_RE.match(v):
+            dues.append(v)
+        else:
+            log(f"menxia: #{p['number']} due label 格式不对: {v}")
+    return {
+        "n": p["number"],
+        "title": p["title"],
+        "url": DESK.format(n=p["number"]),
+        "created": p["created_at"],
+        "updated": p["updated_at"],
+        "draft": bool(p.get("draft")),
+        "wait": waits[0] if waits else None,
+        "kind": (label_values(labels, "kind:") or [None])[0],
+        "proj": label_values(labels, "proj:"),
+        "deadline": min(dues) if dues else "",
+        "deadline_note": "",
+    }
+
+
 def main():
     r = run(["gh", "api", "--paginate", f"repos/{REPO}/pulls?state=open&per_page=100"], timeout=60)
     # --paginate 会把多页 JSON 数组首尾相接
     raw = r.stdout.strip().replace("][", ",")
     prs = json.loads(raw or "[]")
-    items = []
-    for p in prs:
-        labels = p.get("labels", [])
-        waits = label_values(labels, "wait:")
-        items.append({
-            "n": p["number"],
-            "title": p["title"],
-            "url": DESK.format(n=p["number"]),
-            "created": p["created_at"],
-            "updated": p["updated_at"],
-            "draft": bool(p.get("draft")),
-            "wait": waits[0] if waits else None,
-            "kind": (label_values(labels, "kind:") or [None])[0],
-            "proj": label_values(labels, "proj:"),
-        })
+    items = [folder_item(p) for p in prs]
     counts = {w: 0 for w in WAITS}
     counts["未标注"] = 0
     groups = {w: [] for w in WAITS + ["未标注"]}
