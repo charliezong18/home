@@ -22,6 +22,8 @@ run_source() {  # $1 = 源名, $2 = 脚本
 
 run_source menxia collect_menxia.py
 run_source dashboard collect_dashboard.py
+run_source countdown collect_countdown.py
+run_source backlog collect_backlog.py
 
 out="$("$PY" "$DIR/build_home.py" 2>&1)"; rc=$?
 echo "$out"
