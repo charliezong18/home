@@ -168,6 +168,12 @@ python3 ~/Developer/home/collectors/apply_edits.py --mark-done <id> --result "�
 
 幂等：账本按 `id` 合并，只处理 `state=pending`；卡已落但账本没推上时，下轮重放不会重复记日志。vault 读写超 30 秒整轮跳过，下轮再试。`edits.jsonl` schema 见 home-data 分支 README。
 
+### 读物状态行（读完 / 不读了）
+
+「丢的链接」每行末尾有两个小按钮。点击后乐观隐藏该行，并用同一套 GET sha → 追加 → PUT 往 `home-data` 的 `readings.jsonl` 追加 `{"id":"link-…","status":"done"|"dropped","ts":"…Z","from":"web"}`；失败则恢复该行并在行内显示错误。账本 append-only、同 id 后者生效，`build_home.load_readings()` 已按此归并并滤掉 done / dropped（状态行只有 id/status/ts/from 也能合并）。iOS 邸报写同形记录（`from:"ios"`）。`?demo=1` 下只做本地隐藏，不发请求。
+
+误点复活：再追加一行同 id 的 `{"status":"new"}`（`add_link.py` 同 id 追加亦可），不删行。
+
 ## 夜间养卡摘要
 
 `python3 ~/Developer/home/collectors/daily_digest.py [--date YYYY-MM-DD] [--out PATH] [--max-chars 60000]`：把当天（America/Los_Angeles）Hermes 会话、Claude transcript、主页编辑摘成 `~/Library/Caches/ai-home/digest-<date>.md`，供 Claude 对照 Dashboard 卡更新；stdout 一行统计，无内容打 `digest <date> empty`。只读、纯标准库。

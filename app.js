@@ -19,10 +19,14 @@ const LEAD_DAYS = 30;       // 头条候选的截止窗口
 const OVERDUE_AFTER = 14;   // 过期超过此天数的项目卡 / 折不自动清，统一进「过期待处理」分区（#192 Q6=C）；与 DUE_DAYS 同值但语义独立
 // 编辑流：弹窗「保存」= 往 home-data 的 edits.jsonl 追加一行；Mac mini 每 5 分钟落进 vault 卡（collectors/apply_edits.py）
 const EDITS_PATH = '/repos/charliezong18/review/contents/edits.jsonl';
+// 读物状态行（读完 / 不读了）走同一条路：追加到 home-data 的 readings.jsonl，同 id 后者生效；dibao 拉回后重算
+const READINGS_PATH = '/repos/charliezong18/review/contents/readings.jsonl';
+const DEMO = new URLSearchParams(location.search).has('demo');
 const TIER = { now: 'now', build: 'build', learn: 'learn', ice: 'ice' };
 const STATUS = { active: '推进中', waiting: '等别人', you: '卡在你', ice: '冷冻', done: '完成' };
 let lastData = null;
-const localEdits = [];      // 已保存、home.json 还没反映的编辑；重新读取时叠回去，免得乐观更新被旧数据冲掉
+const localReadings = {};   // id → done|dropped：已点过、home.json 还没反映的读物状态；render 时据此隐藏
+const localEdits = [];    // 已保存、home.json 还没反映的编辑；重新读取时叠回去，免得乐观更新被旧数据冲掉
 
 const $ = (id) => document.getElementById(id);
 const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } };
@@ -96,7 +100,12 @@ function demoData() {
     schema: 1, generated: new Date().toISOString(),
     sources: { menxia: ok, dashboard: ok, readings: ok, countdown: ok, backlog: ok },
     folders: { total: 3, counts: { 你拍: 1, 你读: 1 }, oldest: { 你拍: [{ n: 190, title: '示例折', url: MENXIA, created: day(-4) }, { n: 150, title: '示例旧折', url: `${MENXIA}?pr=150`, created: day(-60), deadline: day(-25), deadline_note: '截止' }], 你读: [{ n: 191, title: '示例读物', url: MENXIA, created: day(-2) }] } },
-    library: [], readings: [],
+    library: [],
+    readings: [
+      { id: 'link-demo-0001', rid: 'r:demo-0001', title: '示例文章甲', url: 'https://example.com/a', why: '示例用途', added: day(-1), status: 'new', folded: false },
+      { id: 'link-demo-0002', rid: 'r:demo-0002', title: '示例文章乙', url: 'https://example.com/b', why: '', added: day(-3), status: 'new', folded: false },
+      { id: 'link-demo-0003', rid: 'r:demo-0003', title: '示例文章丙', url: 'https://example.com/c', why: '', added: day(-5), status: 'new', folded: false },
+    ],
     projects: [
       { id: 'p:示例项目', title: '示例项目', icon: '🧪', tier: 'now', status: 'you', state: 'you', next: '交材料', obsidian: 'obsidian://open?vault=Demo&file=x', deadline: day(2), deadline_note: '截止', updated: day(-1), progress: 40, sections: {} },
       { id: 'p:示例-过期甲', title: '示例过期甲', icon: '📦', tier: 'build', status: 'waiting', state: 'waiting', next: '等回信', deadline: day(-45), deadline_note: '截止', updated: day(-50), progress: 30, sections: {} },
@@ -193,7 +202,34 @@ function row(k, title, href, v, opts = {}) {
     opts.id ? idBtn(opts.id, 'k') : h('span', { class: 'k' }, k),
     h('a', { class: 't', href: safeUrl(href), 'aria-label': `${opts.label || title}${ext ? '（新窗口打开）' : ''}`,
       target: ext ? '_blank' : null, rel: ext ? 'noopener noreferrer' : null }, title),
-    h('span', { class: 'v', 'aria-hidden': 'true' }, v));
+    h('span', { class: 'v', 'aria-hidden': 'true' }, v),
+    opts.actions || null);
+}
+
+// 读物行的「读完 / 不读了」：乐观隐藏，账本追加失败则回滚并在行内提示
+function readingActions(r) {
+  const label = r.title || r.url || r.id;
+  const err = h('span', { class: 'rerr', role: 'alert' });
+  const btn = (text, status) => h('button', { type: 'button', class: 'mini', 'aria-label': `${text}：${label}`, onclick: (e) => markReading(r, status, e.currentTarget.closest('.row'), err) }, text);
+  return h('span', { class: 'acts' }, err, btn('读完', 'done'), btn('不读了', 'dropped'));
+}
+
+async function markReading(r, status, rowEl, err) {
+  err.textContent = '';
+  localReadings[r.id] = status;
+  rowEl.hidden = true;
+  if (DEMO) { if (lastData) render(lastData); return; }
+  const rec = { id: r.id, status, ts: new Date().toISOString().replace(/\.\d+Z$/, 'Z'), from: 'web' };
+  try {
+    if (!getToken()) throw new Error('这台设备没有 token。');
+    await appendLine(READINGS_PATH, JSON.stringify(rec), `readings: ${r.id} ${status}`);
+  } catch (e) {
+    delete localReadings[r.id];
+    rowEl.hidden = false;
+    err.textContent = e.message;
+    return;
+  }
+  if (lastData) render(lastData);
 }
 
 // 头条规则（#185 第 3 条）：需要你做判断、且有硬截止 → 截止最近的一件。
@@ -280,7 +316,7 @@ function render(data) {
   const due = [...projDue, ...listed].sort((a, b) => (rankDays(a) === rankDays(b) ? 0 : rankDays(a) < rankDays(b) ? -1 : 1));   // 稳定排序：同日项目在前
   const dueNear = due.filter((x) => Number.isFinite(x.days) && x.days >= -DUE_DAYS && x.days <= DUE_DAYS);
   const lib = data.library || [];
-  const links = (data.readings || []).filter((r) => !r.folded);
+  const links = (data.readings || []).filter((r) => !r.folded && !localReadings[r.id]);   // 刚点过读完/不读了的，home.json 还没反映时先藏着
   const newLinks = links.filter((r) => r.status === 'new');
 
   // 计数条（≤5 个）：点数字直达对应 tab
@@ -370,7 +406,7 @@ function render(data) {
   ...[more(lib.length - CAP.lib, '篇', MENXIA)].filter(Boolean));
   $('links-count').textContent = `新 ${newLinks.length}`;
   $('links').replaceChildren(...(links.length
-    ? links.slice(0, CAP.links).map((r) => row('link', `${r.title || r.url}${r.why ? ` —「${r.why}」` : ''}`, r.url, r.added ? md(r.added) : '', { id: r.rid, wide: !!r.rid, label: r.title || r.url }))
+    ? links.slice(0, CAP.links).map((r) => row('link', `${r.title || r.url}${r.why ? ` —「${r.why}」` : ''}`, r.url, r.added ? md(r.added) : '', { id: r.rid, wide: !!r.rid, label: r.title || r.url, actions: r.id ? readingActions(r) : null }))
     : [empty('还没丢过链接', '在任何 App 分享给 Telegram 里的 Hermes，会出现在这里。')]),
   ...[more(links.length - CAP.links, '条')].filter(Boolean));
 }
@@ -526,17 +562,19 @@ const b64enc = (s) => {
 const b64dec = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, '')), (c) => c.charCodeAt(0)));
 
 // GET 取 sha → 末尾追加一行 → PUT；别人同时写（409/422 sha 不符）重试 2 次
-async function appendEdit(rec) {
+const appendEdit = (rec) => appendLine(EDITS_PATH, JSON.stringify(rec), `edits: ${rec.id} ${rec.target}`);
+async function appendLine(path, line, message) {
+  const name = path.split('/').pop();
   const headers = { Authorization: `Bearer ${getToken()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
   for (let attempt = 0; attempt < 3; attempt++) {
-    const g = await fetch(`${API}${EDITS_PATH}?ref=home-data`, { cache: 'no-store', headers });
+    const g = await fetch(`${API}${path}?ref=home-data`, { cache: 'no-store', headers });
     let text = '', sha;
     if (g.ok) { const j = await g.json(); text = b64dec(j.content || ''); sha = j.sha; }
-    else if (g.status !== 404) throw new Error(`读 edits.jsonl 失败：GitHub ${g.status}`);
+    else if (g.status !== 404) throw new Error(`读 ${name} 失败：GitHub ${g.status}`);
     if (text && !text.endsWith('\n')) text += '\n';
-    const r = await fetch(API + EDITS_PATH, {
+    const r = await fetch(API + path, {
       method: 'PUT', headers: { ...headers, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: `edits: ${rec.id} ${rec.target}`, branch: 'home-data', content: b64enc(text + JSON.stringify(rec) + '\n'), ...(sha ? { sha } : {}) }),
+      body: JSON.stringify({ message, branch: 'home-data', content: b64enc(text + line + '\n'), ...(sha ? { sha } : {}) }),
     });
     if (r.ok) return;
     if (r.status === 409 || r.status === 422) continue;
