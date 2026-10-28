@@ -10,7 +10,8 @@ const DATA_PATH = '/repos/charliezong18/review/contents/home.json?ref=home-data'
 const STALE_H = { menxia: 4, dashboard: 4, readings: 4 };   // 3h 心跳 + 30min 采集周期 + 余量
 const MENXIA = 'https://menxia-reader.github.io/menxia/';
 // 每栏封顶条数（宽屏 1280×800 一屏放下），超出显示「还有 N 条 →」，不做无限滚动
-const CAP = { due: 6, proj: 6, lib: 5, links: 3 };
+const CAP = { due: 8, proj: 6, lib: 5, links: 3 };
+const DUE_ICON = { countdown: '📅', backlog: '⏰', calendar: '📅', gmail: '📅' };   // due[] 来源小图标；recur 的统一用 🔁
 const FOLDER_GROUPS = [['你拍', '待你拍', 5], ['你读', '待你读', 3], ['agent', '等 agent', 2]];
 const DUE_DAYS = 14;        // 到期栏窗口；过期超过 14 天的项目卡 deadline 视为卡片没更新，不上栏
 const LEAD_DAYS = 30;       // 头条候选的截止窗口
@@ -79,7 +80,33 @@ function showAuth(msg) {
   $('auth-input').focus();
 }
 
+// ?demo=1 本地预览夹具（不读网络、不要 token）；&nodue=1 去掉 due[]，用来截「改前」图
+function demoData() {
+  const day = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const ok = { updated: new Date().toISOString(), ok: true, consecutive_failures: 0, last_error: '' };
+  const due = [
+    { id: 'd:countdown-示例家人生日', title: '🎂 示例：家人生日', date: day(6), note: '🔁 年度', source: 'countdown', recur: true },
+    { id: 'd:backlog-示例续护照', title: '示例：续护照', date: day(24), note: '窗口 前', source: 'backlog', url: 'obsidian://open?vault=Demo&file=Backlog' },
+    { id: 'd:countdown-示例面试', title: '🎯 示例：面试', date: day(-3), note: '', source: 'countdown' },
+    { id: 'd:backlog-示例核对行程', title: '⚠️ 示例：核对行程', date: '', note: '遗留核对项', source: 'backlog', url: 'obsidian://open?vault=Demo&file=Backlog' },
+  ];
+  return {
+    schema: 1, generated: new Date().toISOString(),
+    sources: { menxia: ok, dashboard: ok, readings: ok, countdown: ok, backlog: ok },
+    folders: { total: 3, counts: { 你拍: 1, 你读: 1 }, oldest: { 你拍: [{ n: 190, title: '示例折', url: MENXIA, created: day(-4) }], 你读: [{ n: 191, title: '示例读物', url: MENXIA, created: day(-2) }] } },
+    library: [], readings: [],
+    projects: [{ id: 'p:示例项目', title: '示例项目', icon: '🧪', tier: 'now', status: 'you', state: 'you', next: '交材料', obsidian: 'obsidian://open?vault=Demo&file=x', deadline: day(2), deadline_note: '截止', updated: day(-1), progress: 40, sections: {} }],
+    due: new URLSearchParams(location.search).has('nodue') ? undefined : due,
+  };
+}
+
 async function load() {
+  if (new URLSearchParams(location.search).has('demo')) {
+    $('auth').hidden = true;
+    $('grid').hidden = false;
+    lastData = demoData();
+    return render(lastData);
+  }
   const token = getToken();
   if (!token) return showAuth('');
   setStatus('读取中…');
@@ -222,31 +249,42 @@ function render(data) {
   const oldest = (data.folders || {}).oldest || {};
   const projects = data.projects || [];
   const live = projects.filter((p) => p.status !== 'done' && p.status !== 'ice' && p.tier !== 'ice');
-  const due = live.filter((p) => p.deadline)
-    .map((p) => ({ ...p, days: daysUntil(p.deadline) }))
-    .filter((p) => Number.isFinite(p.days) && p.days >= -DUE_DAYS && p.days <= DUE_DAYS)
-    .sort((a, b) => a.days - b.days);
+  // 到期栏 = 项目卡 deadline（14 天窗口）+ home.json 的 due[]（build_home 已按 [-14, +60] 过滤；无日期的排最后）
+  const projDue = live.filter((p) => p.deadline)
+    .map((p) => ({ ...p, date: p.deadline, days: daysUntil(p.deadline), note: p.deadline_note, proj: true }))
+    .filter((p) => Number.isFinite(p.days) && p.days >= -DUE_DAYS && p.days <= DUE_DAYS);
+  const listed = (data.due || []).filter((x) => x && typeof x.id === 'string' && x.id.startsWith('d:'))
+    .map((x) => ({ ...x, days: /^\d{4}-\d{2}-\d{2}$/.test(x.date || '') ? daysUntil(x.date) : NaN }));
+  const rankDays = (x) => (Number.isFinite(x.days) ? x.days : Infinity);
+  const due = [...projDue, ...listed].sort((a, b) => (rankDays(a) === rankDays(b) ? 0 : rankDays(a) < rankDays(b) ? -1 : 1));   // 稳定排序：同日项目在前
+  const dueNear = due.filter((x) => Number.isFinite(x.days) && x.days >= -DUE_DAYS && x.days <= DUE_DAYS);
   const lib = data.library || [];
   const links = (data.readings || []).filter((r) => !r.folded);
   const newLinks = links.filter((r) => r.status === 'new');
 
   // 计数条（≤5 个）：点数字直达对应 tab
   const countBtn = (label, n, tab, cls) => h('button', { type: 'button', class: `count ${cls || ''}`, onclick: () => setTab(tab), 'aria-label': `${label} ${n}` }, h('b', {}, n), label);
-  const overdue = due.some((p) => p.days < 0);
+  const overdue = dueNear.some((p) => p.days < 0);
   $('counts').replaceChildren(
     countBtn('待你拍', counts['你拍'] || 0, 'folders', counts['你拍'] ? 'hot' : ''),
     countBtn('待你读', counts['你读'] || 0, 'folders'),
-    countBtn(`${DUE_DAYS} 天内到期`, due.length, 'today', overdue ? 'hot' : due.some((p) => p.days <= 3) ? 'soon' : ''),
+    countBtn(`${DUE_DAYS} 天内到期`, dueNear.length, 'today', overdue ? 'hot' : dueNear.some((p) => p.days <= 3) ? 'soon' : ''),
     countBtn('新读物', newLinks.length, 'reading'),
   );
 
   // Q1 头条 + 到期栏
   renderLead(data, live, counts);
-  $('due').replaceChildren(...(due.length ? due.slice(0, CAP.due).map((p) => h('li', { class: p.days < 0 ? 'over' : p.days <= 3 ? 'soon' : '' },
-    h('span', { class: 'd' }, md(p.deadline)),
-    h('span', { class: 't' }, `${p.icon || ''} ${p.title}`.trim(), h('span', { class: 'm' }, [dueText(p.days), p.deadline_note].filter(Boolean).join(' · '), ' ', idBtn(p.id)))))
+  $('due').replaceChildren(...(due.length ? due.slice(0, CAP.due).map((p) => {
+    const dated = Number.isFinite(p.days);
+    const title = p.proj ? `${p.icon || ''} ${p.title}`.trim() : p.title;
+    const href = p.proj ? null : safeUrl(p.url);
+    return h('li', { class: dated && p.days < 0 ? 'over' : dated && p.days <= 3 ? 'soon' : '' },
+      h('span', { class: 'd' }, dated ? md(p.date) : '待定'),
+      h('span', { class: 't' }, p.proj ? null : h('span', { class: 'si', 'aria-hidden': 'true' }, p.recur ? null : `${DUE_ICON[p.source] || '📅'} `),
+        href ? h('a', { href }, title) : title, h('span', { class: 'm' }, [dated ? dueText(p.days) : '', p.note].filter(Boolean).join(' · '), ' ', idBtn(p.id))));
+  })
     : [h('li', { class: 'empty' }, `${DUE_DAYS} 天内没有到期的事。`)]),
-  ...(due.length > CAP.due ? [h('li', { class: 'empty' }, `还有 ${due.length - CAP.due} 件 · 见 Obsidian Dashboard`)] : []));
+  ...(due.length > CAP.due ? [h('li', { class: 'empty' }, `还有 ${due.length - CAP.due} 件 · 见 Obsidian Dashboard / Backlog`)] : []));
 
   // Q2 折务：待你拍 / 待你读 / 等 agent，等得久的在前，单行
   $('folder-sum').textContent = `共 ${(data.folders || {}).total ?? 0} 折`;

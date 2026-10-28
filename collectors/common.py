@@ -14,7 +14,10 @@ LOCK_FILE = os.path.join(CACHE_DIR, "git.lock")
 REPO = "charliezong18/review"
 BRANCH = "home-data"
 NTFY_URL = "https://ntfy.sh/charlie-claude-notify-6d4720"
-SOURCES = ["menxia", "dashboard", "readings"]
+SOURCES = ["menxia", "dashboard", "readings", "countdown", "backlog"]
+VAULT = os.environ.get("AI_HOME_VAULT", "/Users/charliezong/Sync/My Drive/2nd Brain/Hang")
+COUNTDOWN_REL = "倒数日.md"
+BACKLOG_REL = "📋 Backlog.md"
 
 # launchd 下 PATH 很短，gh/git 在 Homebrew 里
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
