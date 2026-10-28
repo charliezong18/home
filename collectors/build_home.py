@@ -7,15 +7,19 @@
 import datetime as dt
 import json
 import os
+import re
 import subprocess
 import sys
 
+from collect_countdown import next_date
 from common import (CACHE_DIR, DATA_DIR, SOURCES, commit_and_push, data_lock, git, log, now_iso,
                     read_json, snapshot_path, sync_down, write_json)
 
 SCHEMA = 1
 HEARTBEAT_H = 3
 FOLD_DAYS = 30
+DUE_PAST_DAYS = 14
+DUE_AHEAD_DAYS = 60
 LEDGER = os.path.join(DATA_DIR, "readings.jsonl")
 
 
@@ -41,6 +45,36 @@ def load_readings():
             e["folded"] = False
         out.append(e)
     return sorted(out, key=lambda x: x.get("ts", x.get("added", "")), reverse=True)
+
+
+def slug(s):
+    """标题 → ID 片段：去 emoji/标点，小写，空白→-，中文保留，≤30 字。"""
+    s = re.sub(r"[^\w\s-]|_", "", s.lower())
+    return re.sub(r"\s+", "-", s.strip())[:30] or "x"
+
+
+def due_items(snaps, life=None, today=None):
+    """倒数日 + Backlog 窗口 + life.jsonl（WP-08b）→ home["due"]。
+    合并 → 去重（同 id 后者生效）→ 滤掉 [今天-14, 今天+60] 之外的有日期项 → 按 date 升序；无日期项（backlog）排最后。"""
+    today = today or dt.date.today()
+    lo, hi = today - dt.timedelta(days=DUE_PAST_DAYS), today + dt.timedelta(days=DUE_AHEAD_DAYS)
+    items = []
+    for c in ((snaps.get("countdown") or {}).get("data") or {}).get("items", []):
+        d = next_date(c, today)
+        if d:
+            items.append({"id": f"d:countdown-{slug(c['label'])}", "title": c["label"], "date": d.isoformat(),
+                          "note": "🔁 年度" if c.get("recur") else "", "source": "countdown",
+                          **({"recur": True} if c.get("recur") else {})})
+    b = (snaps.get("backlog") or {}).get("data") or {}
+    for i in b.get("items", []):
+        items.append({"id": f"d:backlog-{slug(i['title'])}", "title": i["title"], "date": i.get("date", ""),
+                      "note": i.get("note", ""), "source": "backlog", **({"url": b["url"]} if b.get("url") else {})})
+    items.extend(life or [])
+    latest = {}
+    for it in items:
+        latest[it["id"]] = {**latest.get(it["id"], {}), **it}
+    kept = [it for it in latest.values() if not it.get("date") or lo.isoformat() <= it["date"] <= hi.isoformat()]
+    return sorted(kept, key=lambda it: (not it.get("date"), it.get("date", "")))
 
 
 def edit_counts():
@@ -98,7 +132,7 @@ def main():
     status = read_json(os.path.join(CACHE_DIR, "status.json"), {}) or {}
     with data_lock():
         sync_down()
-        snaps = {s: read_json(snapshot_path(s)) for s in ("menxia", "dashboard")}
+        snaps = {s: read_json(snapshot_path(s)) for s in ("menxia", "dashboard", "countdown", "backlog")}
         readings, readings_err = [], ""
         try:
             readings = load_readings()
@@ -124,6 +158,7 @@ def main():
             "library": m.get("library", []),
             "projects": d.get("cards", []),
             "readings": readings,
+            "due": due_items(snaps),
         }
         old_home, old_status = committed("home.json"), committed("status.json")
         changed = old_home is None or normalized(home, status) != normalized(old_home, old_status)

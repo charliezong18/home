@@ -94,7 +94,7 @@ python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<�
 | `#<PR号>` | 折（含弘文馆） | 门下 PR 号，如 `#179` |
 | `p:<slug>` | Dashboard 项目卡 | 卡 frontmatter `id:` 优先；否则文件名去 `proj:` 前缀/emoji/标点、小写、空白→`-`（中文保留）；冲突加 `-2`、`-3`。写进 `home.json` 每张卡的 `id` |
 | `r:<id>` | 丢的链接 | 账本 id 去掉 `link-` 前缀，如 `r:20261013-b559`；`home.json` 里是 `rid` 字段 |
-| `d:<id>` | 到期项（Phase 2） | 只定格式，未实现 |
+| `d:<来源>-<slug或hash8>` | 到期项（`home.json` 的 `due[]`） | `d:countdown-<slug>` 倒数日、`d:backlog-<slug>` Backlog「⏰ 有窗口的」；`d:cal-<hash8>` / `d:bill-<hash8>` 留给 WP-08b。schema 见 review-home-data README |
 
 Hermes 解析（读本地 `~/Developer/review-home-data/home.json`，不走网络；找不到退出码 1）：
 
