@@ -10,11 +10,13 @@ const DATA_PATH = '/repos/charliezong18/review/contents/home.json?ref=home-data'
 const STALE_H = { menxia: 4, dashboard: 4, readings: 4 };   // 3h 心跳 + 30min 采集周期 + 余量
 const MENXIA = 'https://menxia-reader.github.io/menxia/';
 // 每栏封顶条数（宽屏 1280×800 一屏放下），超出显示「还有 N 条 →」，不做无限滚动
-const CAP = { due: 8, proj: 6, lib: 5, links: 3 };
+const CAP = { due: 8, proj: 6, lib: 5, links: 3, overdue: 8 };
+const TAB_KEY = 'dibao.tab';
 const DUE_ICON = { countdown: '📅', backlog: '⏰', calendar: '📅', gmail: '📅' };   // due[] 来源小图标；recur 的统一用 🔁
 const FOLDER_GROUPS = [['你拍', '待你拍', 5], ['你读', '待你读', 3], ['agent', '等 agent', 2]];
 const DUE_DAYS = 14;        // 到期栏窗口；过期超过 14 天的项目卡 deadline 视为卡片没更新，不上栏
 const LEAD_DAYS = 30;       // 头条候选的截止窗口
+const OVERDUE_AFTER = 14;   // 过期超过此天数的项目卡 / 折不自动清，统一进「过期待处理」分区（#192 Q6=C）；与 DUE_DAYS 同值但语义独立
 // 编辑流：弹窗「保存」= 往 home-data 的 edits.jsonl 追加一行；Mac mini 每 5 分钟落进 vault 卡（collectors/apply_edits.py）
 const EDITS_PATH = '/repos/charliezong18/review/contents/edits.jsonl';
 const TIER = { now: 'now', build: 'build', learn: 'learn', ice: 'ice' };
@@ -93,9 +95,15 @@ function demoData() {
   return {
     schema: 1, generated: new Date().toISOString(),
     sources: { menxia: ok, dashboard: ok, readings: ok, countdown: ok, backlog: ok },
-    folders: { total: 3, counts: { 你拍: 1, 你读: 1 }, oldest: { 你拍: [{ n: 190, title: '示例折', url: MENXIA, created: day(-4) }], 你读: [{ n: 191, title: '示例读物', url: MENXIA, created: day(-2) }] } },
+    folders: { total: 3, counts: { 你拍: 1, 你读: 1 }, oldest: { 你拍: [{ n: 190, title: '示例折', url: MENXIA, created: day(-4) }, { n: 150, title: '示例旧折', url: `${MENXIA}?pr=150`, created: day(-60), deadline: day(-25), deadline_note: '截止' }], 你读: [{ n: 191, title: '示例读物', url: MENXIA, created: day(-2) }] } },
     library: [], readings: [],
-    projects: [{ id: 'p:示例项目', title: '示例项目', icon: '🧪', tier: 'now', status: 'you', state: 'you', next: '交材料', obsidian: 'obsidian://open?vault=Demo&file=x', deadline: day(2), deadline_note: '截止', updated: day(-1), progress: 40, sections: {} }],
+    projects: [
+      { id: 'p:示例项目', title: '示例项目', icon: '🧪', tier: 'now', status: 'you', state: 'you', next: '交材料', obsidian: 'obsidian://open?vault=Demo&file=x', deadline: day(2), deadline_note: '截止', updated: day(-1), progress: 40, sections: {} },
+      { id: 'p:示例-过期甲', title: '示例过期甲', icon: '📦', tier: 'build', status: 'waiting', state: 'waiting', next: '等回信', deadline: day(-45), deadline_note: '截止', updated: day(-50), progress: 30, sections: {} },
+      { id: 'p:示例-过期乙', title: '示例过期乙', icon: '🧾', tier: 'build', status: 'active', state: 'active', next: '补材料', deadline: day(-30), deadline_note: '截止', updated: day(-33), progress: 60, sections: {} },
+      { id: 'p:示例-过期丙', title: '示例过期丙', icon: '🔧', tier: 'now', status: 'you', state: 'you', next: '决定要不要继续', deadline: day(-20), deadline_note: '提交', updated: day(-21), progress: 10, sections: {} },
+      { id: 'p:示例-刚过期', title: '示例刚过期（不进分区）', icon: '⏳', tier: 'build', status: 'active', state: 'active', next: '收尾', deadline: day(-5), deadline_note: '截止', updated: day(-6), progress: 80, sections: {} },
+    ],
     due: new URLSearchParams(location.search).has('nodue') ? undefined : due,
   };
 }
@@ -105,7 +113,8 @@ async function load() {
     $('auth').hidden = true;
     $('grid').hidden = false;
     lastData = demoData();
-    return render(lastData);
+    render(lastData);
+    return handleDeepLink(lastData);
   }
   const token = getToken();
   if (!token) return showAuth('');
@@ -130,6 +139,7 @@ async function load() {
   lastData = data;
   render(data);
   setStatus('');
+  handleDeepLink(data);
 }
 
 function srcBadge(data, name) {
@@ -196,6 +206,17 @@ function pickLead(data, live) {
     ...live.filter((p) => p.state === 'you' && p.deadline).map((p) => ({ days: daysUntil(p.deadline), deadline: p.deadline, note: p.deadline_note || '截止',
       title: `${p.icon || ''} ${p.title}`.trim(), href: p.obsidian, act: '在 Obsidian 打开 →', dek: p.next ? `下一步：${p.next}` : (p.summary || '') })),
   ].filter((c) => Number.isFinite(c.days) && c.days >= -DUE_DAYS && c.days <= LEAD_DAYS).sort((a, b) => a.days - b.days)[0] || null;
+}
+
+// 过期待处理（#192 Q6=C）：deadline 早于今天超过 OVERDUE_AFTER 天的项目卡 + 折，原样保留日期，过期最久在前
+function pickOverdue(data, live) {
+  const folders = Object.values((data.folders || {}).oldest || {}).flat();
+  return [
+    ...live.filter((p) => p.deadline).map((p) => ({ kind: 'project', id: p.id, title: `${p.icon || ''} ${p.title}`.trim(), deadline: p.deadline,
+      days: daysUntil(p.deadline), note: p.deadline_note || '', href: null, p })),
+    ...folders.filter((f) => f.deadline).map((f) => ({ kind: 'folder', id: `#${f.n}`, title: `#${f.n} ${f.title}`, deadline: f.deadline,
+      days: daysUntil(f.deadline), note: f.deadline_note || '', href: f.url })),
+  ].filter((x) => Number.isFinite(x.days) && x.days < -OVERDUE_AFTER).sort((a, b) => a.days - b.days);
 }
 
 function renderLead(data, live, counts) {
@@ -265,10 +286,12 @@ function render(data) {
   // 计数条（≤5 个）：点数字直达对应 tab
   const countBtn = (label, n, tab, cls) => h('button', { type: 'button', class: `count ${cls || ''}`, onclick: () => setTab(tab), 'aria-label': `${label} ${n}` }, h('b', {}, n), label);
   const overdue = dueNear.some((p) => p.days < 0);
+  const overdueItems = pickOverdue(data, live);
   $('counts').replaceChildren(
     countBtn('待你拍', counts['你拍'] || 0, 'folders', counts['你拍'] ? 'hot' : ''),
     countBtn('待你读', counts['你读'] || 0, 'folders'),
     countBtn(`${DUE_DAYS} 天内到期`, dueNear.length, 'today', overdue ? 'hot' : dueNear.some((p) => p.days <= 3) ? 'soon' : ''),
+    countBtn('过期待处理', overdueItems.length, 'today', overdueItems.length ? 'hot' : ''),
     countBtn('新读物', newLinks.length, 'reading'),
   );
 
@@ -285,6 +308,20 @@ function render(data) {
   })
     : [h('li', { class: 'empty' }, `${DUE_DAYS} 天内没有到期的事。`)]),
   ...(due.length > CAP.due ? [h('li', { class: 'empty' }, `还有 ${due.length - CAP.due} 件 · 见 Obsidian Dashboard / Backlog`)] : []));
+
+  // 过期待处理：不自动清，卡片与日期原样保留
+  $('overdue-n').textContent = String(overdueItems.length);
+  $('overdue').replaceChildren(...(overdueItems.length ? overdueItems.slice(0, CAP.overdue).map((x) => {
+    const href = x.kind === 'folder' ? safeUrl(x.href) : null;
+    const title = x.kind === 'project'
+      ? h('button', { type: 'button', class: 'lnk', onclick: () => openProject(x.p), 'aria-label': `${x.title}，已过期 ${-x.days} 天，打开详情` }, x.title)
+      : (href ? h('a', { href }, x.title) : x.title);
+    return h('li', { class: 'over' },
+      h('span', { class: 'd' }, md(x.deadline)),
+      h('span', { class: 't' }, title, h('span', { class: 'm' }, [`已过 ${-x.days} 天`, x.note].filter(Boolean).join(' · '), ' ', idBtn(x.id))));
+  })
+    : [h('li', { class: 'empty' }, '没有过期待处理的事。')]),
+  ...(overdueItems.length > CAP.overdue ? [h('li', { class: 'empty' }, `还有 ${overdueItems.length - CAP.overdue} 件 · 见 Obsidian Dashboard`)] : []));
 
   // Q2 折务：待你拍 / 待你读 / 等 agent，等得久的在前，单行
   $('folder-sum').textContent = `共 ${(data.folders || {}).total ?? 0} 折`;
@@ -361,6 +398,36 @@ function openProject(p) {
   $('pd-msg').hidden = true;
   $('proj-dialog').showModal();
   measureMore();
+  setUrlId(p.id);
+}
+
+// 地址栏同步当前打开的项目（?id=）；保留其他参数（如 demo=1）
+function setUrlId(id) {
+  const q = new URLSearchParams(location.search);
+  if (id) q.set('id', id); else q.delete('id');
+  const s = q.toString();
+  history.replaceState(null, '', location.pathname + (s ? `?${s}` : ''));
+}
+
+// 深链 ?id=：p:… 开项目弹窗，#n 跳门下，r:… 跳原链接。只在首次数据到达后处理一次
+let deepLinkDone = false;
+function handleDeepLink(data) {
+  if (deepLinkDone) return;
+  deepLinkDone = true;
+  const id = new URLSearchParams(location.search).get('id');
+  if (!id) return;
+  if (id.startsWith('p:')) {
+    const p = (data.projects || []).find((x) => x.id === id);
+    if (p) openProject(p); else setStatus(`深链 ${id} 在当前数据里找不到。`, true);
+  } else if (/^#\d+$/.test(id)) {
+    location.href = `${MENXIA}?pr=${id.slice(1)}`;
+  } else if (id.startsWith('r:')) {
+    const r = (data.readings || []).find((x) => x.rid === id);
+    const u = r && safeUrl(r.url);
+    if (u) location.href = u; else setStatus(`深链 ${id} 在当前数据里找不到。`, true);
+  } else {
+    setStatus(`不认识的深链 ${id}。`, true);
+  }
 }
 
 function measureMore() {
@@ -537,6 +604,7 @@ async function saveEdit(ev) {
 function setTab(tab) {
   document.body.dataset.tab = tab;
   document.querySelectorAll('.tabs [role=tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  try { localStorage.setItem(TAB_KEY, tab); } catch { /* 无痕模式存不了就算了 */ }
 }
 
 document.querySelectorAll('.tabs [role=tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
@@ -573,5 +641,19 @@ document.addEventListener('touchend', (e) => {
   setTab(TABS[Math.max(0, Math.min(TABS.length - 1, i + (dx < 0 ? 1 : -1)))]);
 }, { passive: true });
 
-setTab('today');
+// 弹窗关闭（×、点遮罩、Esc 都会触发 close）→ 清掉地址栏的 ?id=
+$('proj-dialog').addEventListener('close', () => setUrlId(null));
+
+// 键盘：1–4 切 tab，r 刷新；输入框聚焦或弹窗打开时不触发
+document.addEventListener('keydown', (e) => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const t = e.target;
+  if (t && (['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName) || t.isContentEditable)) return;
+  if ($('proj-dialog').open) return;
+  if (/^[1-4]$/.test(e.key)) setTab(TABS[+e.key - 1]);
+  else if (e.key === 'r') load();
+});
+
+const stored = (() => { try { return localStorage.getItem(TAB_KEY); } catch { return null; } })();
+setTab(new URLSearchParams(location.search).has('id') ? 'today' : (TABS.includes(stored) ? stored : 'today'));
 load();

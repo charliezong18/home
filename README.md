@@ -148,6 +148,13 @@ python3 ~/Developer/home/collectors/resolve.py '#179' 'p:门下-menxia' 'r:20261
 # url：折=门下深链；项目卡=vault 绝对路径；读物=原链接。折只覆盖 home.json 收录的（每类最旧 8 折 + 弘文馆）
 ```
 
+## 深链、快捷键、过期待处理
+
+- **深链** `https://charliezong18.github.io/home/?id=<ID>`：`p:<slug>` 直接开项目弹窗（找不到时页脚提示一行）；`%23<PR号>`（即 `#179`，`#` 在 URL 里须写成 `%23`）跳门下对应折；`r:<id>` 跳原链接。开弹窗时地址栏自动写 `?id=`，关弹窗清掉。
+- **快捷键**：`1`–`4` 切 tab（头条/折务/项目/读物），`r` 重新读取；输入框聚焦或弹窗打开时不触发。上次所在 tab 记在 `localStorage` 的 `dibao.tab`，带 `?id=` 打开时落在头条。
+- **过期待处理**：到期 tab 里的分区，收 `deadline` 早于今天**超过 14 天**的项目卡与折（`OVERDUE_AFTER`），不自动清、日期原样保留，过期最久的在前；头条与「14 天内到期」栏不含它们。
+- **本地预览** `?demo=1`：不读网络、不要 token，用 `app.js` 里的虚构夹具（含 3 张过期项目卡、1 折带 deadline）。夹具内联在 JS 里，因为页面 CSP 的 `connect-src` 只放行 `api.github.com`，同源 fetch JSON 会被拦。
+
 ## 编辑流（弹窗编辑 → 保存 → 触发更新）
 
 1. 页面：项目卡弹窗「编辑」可改 `next` / `status` / `tier` / `deadline`、勾里程碑，另有「给 Hermes 的话」。「保存」用同一把 `zhupi.token` 往 review 仓 `home-data` 分支的 `edits.jsonl` 追加一行 `state:"pending"`（GET sha → 追加 → PUT，sha 冲突重试 2 次）。**token 需要 review 仓 Contents: Read and write**；没有时保存会报 403 并提示。

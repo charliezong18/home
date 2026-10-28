@@ -84,6 +84,8 @@ a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid 
 .cid:hover { color: var(--text); text-decoration: underline; text-decoration-color: var(--text-3); text-underline-offset: 3px; }
 dialog header .cid { margin-left: var(--s2); vertical-align: middle; }
 .due .m .cid { display: inline; }
+.due .t .lnk { background: none; border: 0; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+.due .t .lnk:hover { text-decoration: underline; text-decoration-color: var(--text-3); text-underline-offset: 3px; }
 @media (pointer: coarse) { .cid { padding: 6px 0; } }
 .row .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .row .v { font: var(--fs-12) var(--mono); color: var(--text-3); white-space: nowrap; }
