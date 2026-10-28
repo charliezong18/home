@@ -122,8 +122,8 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(req(self.port, "PATCH", "/v1/readings/r:none", {"status": "done"})[0], 404)
         self.assertEqual(req(self.port, "PATCH", f"/v1/readings/{rid}", {"status": "weird"})[0], 400)
 
-    def test_08_collect_placeholder_host_and_404(self):
-        self.assertEqual(req(self.port, "POST", "/v1/collect", {})[:2], (501, {"error": "WP-09b"}))
+    def test_08_collect_bad_source_host_and_404(self):
+        self.assertEqual(req(self.port, "POST", "/v1/collect", {"sources": ["nope"]})[0], 400)
         self.assertEqual(req(self.port, "GET", "/nope")[0], 404)
         code, _, _ = req(self.port, "GET", "/health", headers={"Host": "evil.example.com"})
         self.assertEqual(code, 421)

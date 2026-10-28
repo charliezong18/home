@@ -21,6 +21,11 @@
 - [ ] Charlie 浏览器实测「编辑 → 保存」（含 PAT 是否有 Contents: write）
 - [ ] Hermes cron：每 15 分钟 `apply_edits.py --list-pending-notes`，有单就派 Claude，完了 `--mark-done`
 
+## dibao A 期（#192 / #187）
+- [x] WP-09a 服务核心（已合并）
+- [x] WP-09b 采集调度 + push 防抖 + `/v1/collect` + cli 子命令 + 旧 plist 进 `launchd/_retired/` + Makefile `retire`/`rollback`/`status`（代码就绪，**未执行 retire**）
+- [ ] Hermes：`make install` → `make retire` → 改两条 cron（见 README「服务化切换步骤」）
+
 ## 下一步（留给 Charlie / 后续）
 - [ ] 四端打开 + 同源 token 是否读到（§7 第 5 行）——需 Charlie 在 Mac / iPhone / iPad / 工作电脑上各开一次
 - [ ] Hermes 路由：「只有链接（+一句话）」→ 调 `python3 ~/Developer/home/collectors/add_link.py <url> [附言]`，成功回 ✓

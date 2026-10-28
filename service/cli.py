@@ -3,9 +3,10 @@
 
   cli.py [--port 8766] health
   cli.py edits --json '{"target":"p:x","fields":{"next":"…"},"from":"claude"}'
-  cli.py readings --url URL [--why 理由]
+  cli.py readings-add --url URL [--why 理由]      （readings 为旧别名）
   cli.py notes-pending
-  cli.py note-done ID [--result 文本]
+  cli.py note-done --id ID [--result 文本]
+  cli.py collect [--sources menxia,dashboard]     立即触发一轮采集，返回 job id（GET /v1/collect/{job} 查）
 输出响应 JSON；HTTP 非 2xx 退出码 1。
 """
 import argparse
@@ -33,12 +34,14 @@ def main(argv=None):
     sub.add_parser("health")
     sub.add_parser("notes-pending")
     sub.add_parser("edits").add_argument("--json", required=True)
-    p = sub.add_parser("readings")
+    p = sub.add_parser("readings-add", aliases=["readings"])
     p.add_argument("--url", required=True)
     p.add_argument("--why", default="")
     p = sub.add_parser("note-done")
-    p.add_argument("id")
+    p.add_argument("--id", dest="id", required=True)
     p.add_argument("--result", default="")
+    p = sub.add_parser("collect")
+    p.add_argument("--sources", default="", help="逗号分隔（menxia,dashboard），缺省 = 全部")
     a = ap.parse_args(argv)
     if a.cmd == "health":
         code, out = call(a.port, "GET", "/health")
@@ -46,8 +49,11 @@ def main(argv=None):
         code, out = call(a.port, "GET", "/v1/notes/pending")
     elif a.cmd == "edits":
         code, out = call(a.port, "POST", "/v1/edits", json.loads(a.json))
-    elif a.cmd == "readings":
+    elif a.cmd in ("readings", "readings-add"):
         code, out = call(a.port, "POST", "/v1/readings", {"url": a.url, "why": a.why})
+    elif a.cmd == "collect":
+        srcs = [s for s in a.sources.split(",") if s]
+        code, out = call(a.port, "POST", "/v1/collect", {"sources": srcs} if srcs else {})
     else:
         code, out = call(a.port, "POST", f"/v1/notes/{a.id}/done", {"result": a.result})
     print(f"HTTP {code}")

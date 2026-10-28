@@ -67,23 +67,34 @@ Mac mini dibao :8766
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/health` | `{ok, uptime_s, last_sync_down, last_push, pending_edits, vault_ok, version}` |
+| GET | `/health` | `{ok, uptime_s, last_sync_down, last_push, pending_edits, vault_ok, version, last_collect, collect_failures, push_failures}` |
 | GET | `/v1/home.json` `/v1/status.json` | 本地文件，`ETag`（sha256 前 16 位），`If-None-Match` → 304 |
 | POST | `/v1/edits` | body = Edit 首行（`from`: `hermes`/`claude`）→ 校验 → 追加 → 同步落卡 → `200 {edit, project, generated}`；超时 `202 {edit:{state:"pending"}}`（60 s 内由同步循环补上）；校验不过 400 |
 | POST | `/v1/readings` | `{url, why}` → `201` Reading；URL 已在账本 → `200` 原记录 |
 | PATCH | `/v1/readings/{id}` | `{status}`（new/reading/done/dropped），id 可用账本 id 或 `r:…` |
 | GET | `/v1/notes/pending` | = `apply_edits --list-pending-notes` |
 | POST | `/v1/notes/{id}/done` | `{result}` = `--mark-done` |
-| POST | `/v1/collect` | `501 {error:"WP-09b"}` 占位 |
+| POST | `/v1/collect` | `{sources?:["menxia","dashboard"]}` → `202 {job}`，异步跑一轮（采集器子进程 120 s 超时 → build）；源名不对 400 |
+| GET | `/v1/collect/{job}` | `{id, state: running/done/error, sources, result}` |
 
 ```bash
 make install     # 建 ~/.config/dibao、~/Library/Logs/dibao，拷 plist，launchctl bootstrap，打 /health（由 Hermes 执行）
 make health / make uninstall / make test
-python3 service/cli.py health | edits --json '…' | readings --url URL | notes-pending | note-done ID
+python3 service/cli.py health | edits --json '…' | readings-add --url URL --why 理由 | notes-pending | note-done --id ID --result 文本 | collect
 python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<临时 git 仓> DIBAO_PORT=<端口>，绝不指向真实 review-home-data
 ```
 
-配置 `~/.config/dibao/config.toml`（样例 `service/config.example.toml`），环境变量 `DIBAO_*` 优先。日志 `~/Library/Logs/dibao/api.log`，1 MB × 3 轮转。回滚：`launchctl bootout gui/$(id -u)/com.charlie.dibao`，把旧两个 plist 放回（WP-09b 的 `rollback`）。
+配置 `~/.config/dibao/config.toml`（样例 `service/config.example.toml`），环境变量 `DIBAO_*` 优先。日志 `~/Library/Logs/dibao/api.log`，1 MB × 3 轮转。回滚：`make rollback`（bootout dibao，把 `~/Library/LaunchAgents/_retired-dibao-<日期>/` 里旧两个 plist 放回并 bootstrap）。
+
+**调度（WP-09b）**：采集线程每 `collect_secs`（缺省 1800，`DIBAO_COLLECT_SECS` / `--collect-secs`）跑一轮 `collect_menxia` → `collect_dashboard` → 重算 home.json，采集器仍是子进程（120 s 超时），`status.py` 记成败与 ntfy 告警不变。本地提交后 `push_debounce_secs`（60）内 push；连续失败 3 次推 ntfy（每天 ≤1 条）。日志 `~/Library/Logs/dibao/sched.log`（轮转同 api.log）。`collectors/run_all.sh` 保留，手动跑也安全（同一把 `data_lock`）。
+
+### 服务化切换步骤（给 Hermes）
+
+1. `make install`（建目录、拷 plist、bootstrap dibao、打 `/health`）。
+2. `make retire`（先确认 dibao `/health` 通过，再 bootout `com.charlie.ai-home` / `ai-home-edits`，两个 plist 挪进 `~/Library/LaunchAgents/_retired-dibao-<日期>/`）。`com.charlie.menxia-approvals` 不动。若第 1 步已装过，直接手动 `make health` 后只做 retire 的 bootout/mv。
+3. Hermes cron `ai-home-pending-notes.sh` 脚本体改成 `python3 ~/Developer/home/service/cli.py notes-pending`（cron 本身由 Hermes 改）。处理完用 `cli.py note-done --id ID --result 文本`。
+4. 养卡 cron 末尾的 `run_all.sh` 改成 `python3 ~/Developer/home/service/cli.py collect`。
+5. 验收：`launchctl list | grep com.charlie` 无 `ai-home` / `ai-home-edits`、有 `com.charlie.dibao`；`make status`；`cli.py collect` 后 `/health` 的 `last_collect` 更新；网页改一张卡 `next`，≤90 秒内 vault 卡改、`home.json` 重算并 push。回滚 `make rollback`。
 
 ## ID 约定
 
