@@ -24,6 +24,7 @@ class Config:
     log_file: str = ""                       # 空 = 打 stderr；install 出来的 config 指向 ~/Library/Logs/dibao/api.log
     worker_cmd: list = field(default_factory=lambda: list(DEFAULT_WORKER))
     recollect_cmd: list = field(default_factory=lambda: list(DEFAULT_RECOLLECT))
+    apns: dict = field(default_factory=dict)  # config.toml [apns]：key_path / key_id / team_id / bundle_id；空 = ntfy-only
 
 
 def load(path=None):
@@ -31,9 +32,11 @@ def load(path=None):
     path = path or CONFIG_PATH
     if tomllib and os.path.exists(path):
         with open(path, "rb") as f:
-            for k, v in tomllib.load(f).get("dibao", {}).items():
-                if hasattr(cfg, k):
-                    setattr(cfg, k, v)
+            toml = tomllib.load(f)
+        for k, v in toml.get("dibao", {}).items():
+            if hasattr(cfg, k):
+                setattr(cfg, k, v)
+        cfg.apns = dict(toml.get("apns", {}))
     env = os.environ
     for key, attr in (("DIBAO_PORT", "port"), ("DIBAO_SYNC_SECS", "sync_down_secs"),
                       ("DIBAO_PUSH_DEBOUNCE", "push_debounce_secs"), ("DIBAO_COLLECT_SECS", "collect_secs"),

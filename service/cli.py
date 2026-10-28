@@ -7,6 +7,7 @@
   cli.py notes-pending
   cli.py note-done --id ID [--result 文本]
   cli.py collect [--sources menxia,dashboard]     立即触发一轮采集，返回 job id（GET /v1/collect/{job} 查）
+  cli.py push-test [--title T] [--body B] [--url menxia://home]   手动发一条推送（APNs，无设备则 ntfy）；会真发，验收用
 输出响应 JSON；HTTP 非 2xx 退出码 1。
 """
 import argparse
@@ -42,6 +43,10 @@ def main(argv=None):
     p.add_argument("--result", default="")
     p = sub.add_parser("collect")
     p.add_argument("--sources", default="", help="逗号分隔（menxia,dashboard），缺省 = 全部")
+    p = sub.add_parser("push-test")
+    p.add_argument("--title", default="测试")
+    p.add_argument("--body", default="门下推送")
+    p.add_argument("--url", default="menxia://home")
     a = ap.parse_args(argv)
     if a.cmd == "health":
         code, out = call(a.port, "GET", "/health")
@@ -51,6 +56,8 @@ def main(argv=None):
         code, out = call(a.port, "POST", "/v1/edits", json.loads(a.json))
     elif a.cmd in ("readings", "readings-add"):
         code, out = call(a.port, "POST", "/v1/readings", {"url": a.url, "why": a.why})
+    elif a.cmd == "push-test":
+        code, out = call(a.port, "POST", "/v1/push/test", {"title": a.title, "body": a.body, "url": a.url})
     elif a.cmd == "collect":
         srcs = [s for s in a.sources.split(",") if s]
         code, out = call(a.port, "POST", "/v1/collect", {"sources": srcs} if srcs else {})

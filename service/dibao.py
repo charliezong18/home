@@ -29,6 +29,8 @@ import apply_edits  # noqa: E402
 import build_home  # noqa: E402
 import config  # noqa: E402
 import ledger  # noqa: E402
+import apns  # noqa: E402
+import events  # noqa: E402
 import dibao_sched as sched  # noqa: E402  (renamed: avoid shadowing stdlib sched)
 from common import BRANCH, DATA_DIR, data_lock, git, now_iso, read_json, sync_down  # noqa: E402
 
@@ -37,6 +39,8 @@ EDITS = os.path.join(DATA_DIR, "edits.jsonl")
 READINGS = os.path.join(DATA_DIR, "readings.jsonl")
 HOME_JSON = os.path.join(DATA_DIR, "home.json")
 STATUS_JSON = os.path.join(DATA_DIR, "status.json")
+DEVICES = os.path.join(DATA_DIR, "devices.jsonl")
+DUE_SCAN_AT = (7, 30)                    # 本地时间；晚于此启动则当天补扫一次（键里带日期，不会重复推）
 MAX_BODY = 64 * 1024
 log = logging.getLogger("dibao")
 
@@ -50,6 +54,8 @@ class Service:
         self.last_sync_down = self.last_push = None
         self.pusher = sched.Pusher(self.do_push, cfg.push_debounce_secs)
         self.sched = sched.Scheduler(self)
+        self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
+        self.due_done = None
         # build_home 直接 import 复用，但它的 sync_down / commit_and_push 换成本服务的（只本地提交，push 走防抖线程）
         build_home.sync_down = lambda: None
         build_home.commit_and_push = self._commit
@@ -78,7 +84,39 @@ class Service:
 
     # ---------- 落卡 + 重算 ----------
     def rebuild(self):
-        return build_home.main()
+        rc = build_home.main()
+        self.fire(lambda: self.notifier.scan_home(read_json(HOME_JSON, {}) or {}))
+        return rc
+
+    # ---------- 推送（APNs，ntfy 兜底）----------
+    def fire(self, fn):
+        """推送走独立线程：不占 svc 锁，也不让 curl 超时拖慢写接口。异常只记日志。"""
+        def run():
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                log.exception("推送异常")
+        threading.Thread(target=run, name="notify", daemon=True).start()
+
+    def _deactivate(self, token, reason):
+        """APNs 报 410 / BadDeviceToken：往 devices.jsonl 追加 active:false 并本地提交（不持锁地调用）。"""
+        with self.svc:
+            with data_lock():
+                ledger.append(DEVICES, {"token": token, "active": False, "ts": now_iso(), "reason": reason})
+                self._commit(["devices.jsonl"], f"devices: deactivate {apns.tail(token)}")
+
+    def due_tick(self):
+        t = time.localtime()
+        today = time.strftime("%Y-%m-%d", t)
+        if (t.tm_hour, t.tm_min) >= DUE_SCAN_AT and self.due_done != today:
+            self.due_done = today
+            self.notifier.scan_due(read_json(HOME_JSON, {}) or {}, today)
+
+    def push_test(self, body):
+        body = body or {}
+        res = self.notifier.send_test(str(body.get("title") or "测试"), str(body.get("body") or "门下推送"),
+                                      str(body.get("url") or "menxia://home"))
+        return (200 if res in ("apns", "ntfy") else 502), {"result": res, "apns": self.notifier.health()}
 
     def process_pending(self):
         """落所有 pending 编辑。返回 {id: 状态行}；超时/worker 异常返回 None（账本不动，下轮再试）。"""
@@ -145,6 +183,15 @@ class Service:
 
         threading.Thread(target=sync_loop, name="sync", daemon=True).start()
         threading.Thread(target=self.sched.loop, args=(self.stop, self.cfg.collect_secs), name="collect", daemon=True).start()
+
+        def due_loop():
+            while not self.stop.wait(60):
+                try:
+                    self.due_tick()
+                except Exception:  # noqa: BLE001
+                    log.exception("到期扫描异常")
+
+        threading.Thread(target=due_loop, name="due", daemon=True).start()
         if self.push:
             threading.Thread(target=self.pusher.loop, args=(self.stop,), name="push", daemon=True).start()
 
@@ -226,6 +273,11 @@ class Service:
                     ledger.append(EDITS, line)
                     self._commit(["edits.jsonl"], f"edits: done {eid}")
             self.rebuild()
+            was_done = rec.get("state") == "done"
+            target = rec.get("target") or eid
+            title = (self.project(target) or {}).get("title") or target
+        if not was_done:
+            self.fire(lambda: self.notifier.note_done(eid, title, target))
         return 200, {"id": eid, "state": "done"}
 
     def health(self):
@@ -239,7 +291,7 @@ class Service:
         return {"ok": True, "uptime_s": int(time.time() - self.started), "last_sync_down": self.last_sync_down,
                 "last_push": self.last_push, "pending_edits": pending, "vault_ok": vault_ok, "version": VERSION,
                 "last_collect": self.sched.last_collect, "collect_failures": self.sched.collect_failures,
-                "push_failures": self.pusher.failures}
+                "push_failures": self.pusher.failures, "apns": self.notifier.health()}
 
     def start_collect(self, body):
         srcs = (body or {}).get("sources")
@@ -318,6 +370,8 @@ def make_handler(svc):
                     return self._send(*svc.patch_reading(m.group(1), self._body()))
                 if method == "POST" and (m := re.fullmatch(r"/v1/notes/([^/]+)/done", path)):
                     return self._send(*svc.note_done(m.group(1), self._body()))
+                if method == "POST" and path == "/v1/push/test":
+                    return self._send(*svc.push_test(self._body()))
                 if method == "POST" and path == "/v1/collect":
                     return self._send(*svc.start_collect(self._body()))
                 if method == "GET" and (m := re.fullmatch(r"/v1/collect/([^/]+)", path)):

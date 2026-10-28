@@ -80,13 +80,14 @@ Mac mini dibao :8766
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/health` | `{ok, uptime_s, last_sync_down, last_push, pending_edits, vault_ok, version, last_collect, collect_failures, push_failures}` |
+| GET | `/health` | `{ok, uptime_s, last_sync_down, last_push, pending_edits, vault_ok, version, last_collect, collect_failures, push_failures, apns:{configured, devices, last_push, last_error}}` |
 | GET | `/v1/home.json` `/v1/status.json` | 本地文件，`ETag`（sha256 前 16 位），`If-None-Match` → 304 |
 | POST | `/v1/edits` | body = Edit 首行（`from`: `hermes`/`claude`）→ 校验 → 追加 → 同步落卡 → `200 {edit, project, generated}`；超时 `202 {edit:{state:"pending"}}`（60 s 内由同步循环补上）；校验不过 400 |
 | POST | `/v1/readings` | `{url, why}` → `201` Reading；URL 已在账本 → `200` 原记录 |
 | PATCH | `/v1/readings/{id}` | `{status}`（new/reading/done/dropped），id 可用账本 id 或 `r:…` |
 | GET | `/v1/notes/pending` | = `apply_edits --list-pending-notes` |
 | POST | `/v1/notes/{id}/done` | `{result}` = `--mark-done` |
+| POST | `/v1/push/test` | `{title?, body?, url?}` → 立刻发一条推送（APNs，无设备则 ntfy）；`200 {result, apns}`，没送达 `502`。**会真发** |
 | POST | `/v1/collect` | `{sources?:["menxia","dashboard"]}` → `202 {job}`，异步跑一轮（采集器子进程 120 s 超时 → build）；源名不对 400 |
 | GET | `/v1/collect/{job}` | `{id, state: running/done/error, sources, result}` |
 
@@ -100,6 +101,25 @@ python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<�
 配置 `~/.config/dibao/config.toml`（样例 `service/config.example.toml`），环境变量 `DIBAO_*` 优先。日志 `~/Library/Logs/dibao/api.log`，1 MB × 3 轮转。回滚：`make rollback`（bootout dibao，把 `~/Library/LaunchAgents/_retired-dibao-<日期>/` 里旧两个 plist 放回并 bootstrap）。
 
 **调度（WP-09b）**：采集线程每 `collect_secs`（缺省 1800，`DIBAO_COLLECT_SECS` / `--collect-secs`）跑一轮 `collect_menxia` → `collect_dashboard` → 重算 home.json，采集器仍是子进程（120 s 超时），`status.py` 记成败与 ntfy 告警不变。本地提交后 `push_debounce_secs`（60）内 push；连续失败 3 次推 ntfy（每天 ≤1 条）。日志 `~/Library/Logs/dibao/sched.log`（轮转同 api.log）。`collectors/run_all.sh` 保留，手动跑也安全（同一把 `data_lock`）。
+
+### 推送（WP-11：APNs，ntfy 兜底）
+
+`service/apns.py`（发送）+ `service/events.py`（事件与去重）。只用标准库 + 子进程：JWT 用 `openssl dgst -sha256 -sign` 签（DER → raw r||s，缓存 50 分钟），发送用 `curl --http2`（系统 curl 不支持 HTTP/2 时在 `[apns] curl` 填 `/opt/homebrew/opt/curl/bin/curl`）。
+
+- **密钥**：Charlie 在 Apple Developer → Keys 建 APNs Auth Key，.p8 放 `~/.config/dibao/apns/AuthKey_<KEYID>.p8`（`chmod 600`，进程只读）。
+- **配置**：`~/.config/dibao/config.toml` 加 `[apns]` 段（字段见 `service/config.example.toml`：`key_id`、`team_id`、`bundle_id`，可选 `key_path`、`curl`）。删掉整段 = 回到 ntfy-only。
+- **设备**：每轮 `sync_down` 后读 home-data 的 `devices.jsonl`，同 `token` 后者生效，取 `active:true`；`env:"sandbox"` 发 `api.sandbox.push.apple.com`，否则 `api.push.apple.com`。APNs 回 410 或 400 `BadDeviceToken` → 追加 `{"token":…,"active":false,"reason":…}` 并本地提交（随 push 防抖推回）。403 令牌问题刷新 JWT 重试一次。日志只记 token 末 6 位与响应 `reason`。
+- **事件**（`apns-collapse-id` = 去重键；已推键记在 `~/.local/state/dibao/pushed.jsonl`，`fold-`/`note-` 永久，带日期的键保留 7 天）：
+
+  | 事件 | 触发 | 键 | 文案 | 深链 |
+  |---|---|---|---|---|
+  | 新「你拍」折 | 每次重算后 `folders.oldest.你拍` 出现新 `n`（首次部署静默记基线，不把现有折当新） | `fold-<n>` | 待你拍：#n 标题 | `menxia://?pr=<n>` |
+  | 附言处理完 | `POST /v1/notes/{id}/done` | `note-<id>` | 附言已处理：卡标题 | `menxia://home?id=<target>` |
+  | 采集连续失败 ≥3 | 重算后 `sources[*].consecutive_failures` | `fail-<源>-<日期>` | 邸报采集 <源> 连续失败 | `menxia://home` |
+  | 到期当天 | 本地 07:30 起每天一次，扫 `projects[].deadline` 与 `due[].date` | `due-<id>-<日期>` | 今天截止：标题 | `menxia://home?id=<id>` |
+
+- **ntfy 兜底**：没有 active 设备（含未配置 `[apns]`）或所有设备都失败 → 同一条发到 `NTFY_URL`，`Click` 头带深链；APNs 至少一台成功就不发 ntfy。例外：采集失败事件**不**走 ntfy（`status.py` 在连败 3 次时已自己推过 ntfy，再发一遍是重复）。`AI_HOME_NTFY_DRYRUN=1` 时 ntfy 只打印。未送达的事件不记入去重集合，下次扫描重试。
+- **手动发一条（会真发）**：`python3 service/cli.py push-test --title 测试 --body 门下推送 --url 'menxia://home'`（走 `POST /v1/push/test`，所以 `/health.apns.last_push` 会更新）。`/health` 的 `apns` = `{configured, devices, last_push, last_error}`。
 
 ### 服务化切换步骤（给 Hermes）
 
