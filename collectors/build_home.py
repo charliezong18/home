@@ -79,6 +79,21 @@ def committed(path):
     return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
 
 
+def source_entry(s, st, snap, readings_err):
+    updated = snap["fetched"] if snap else None
+    if s == "readings":
+        updated = now_iso() if not readings_err else None
+    fails = st.get("consecutive_failures", 0)
+    ok = fails == 0 and not (s == "readings" and readings_err)
+    if ok:
+        err = ""
+    elif s == "readings" and readings_err:
+        err = readings_err
+    else:
+        err = st.get("last_error_msg", "")
+    return {"updated": updated, "ok": ok, "consecutive_failures": fails, "last_error": err}
+
+
 def main():
     status = read_json(os.path.join(CACHE_DIR, "status.json"), {}) or {}
     with data_lock():
@@ -93,15 +108,7 @@ def main():
         for s in SOURCES:
             st = status.get(s, {})
             snap = snaps.get(s)
-            updated = snap["fetched"] if snap else None
-            if s == "readings":
-                updated = now_iso() if not readings_err else None
-            sources[s] = {
-                "updated": updated,
-                "ok": (st.get("consecutive_failures", 0) == 0) and not (s == "readings" and readings_err),
-                "consecutive_failures": st.get("consecutive_failures", 0),
-                "last_error": readings_err if (s == "readings" and readings_err) else st.get("last_error_msg", ""),
-            }
+            sources[s] = source_entry(s, st, snap, readings_err)
         m = (snaps.get("menxia") or {}).get("data") or {}
         d = (snaps.get("dashboard") or {}).get("data") or {}
         ec = edit_counts()
