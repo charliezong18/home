@@ -1,6 +1,7 @@
 #!/bin/bash
 # AI 主页一轮采集：各采集器 → 记 status → 汇总推送。launchd 每 30 分钟跑一次。
 # 单个采集器失败不拦后面的；汇总照样跑（页面会用旧快照 + 灰角标）。
+# 服务化后由 dibao 调度（service/sched.py）；手动跑也安全（拿同一把 data_lock）。
 set -u
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 DIR="$(cd "$(dirname "$0")" && pwd)"
