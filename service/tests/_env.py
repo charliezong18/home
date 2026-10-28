@@ -19,6 +19,8 @@ SNAP = os.path.join(CACHE, "snapshot-dashboard.json")
 os.environ["AI_HOME_DATA"] = DATA
 os.environ["AI_HOME_CACHE"] = CACHE
 os.environ["DIBAO_CONFIG"] = os.path.join(ROOT, "no-such-config.toml")
+os.environ["DIBAO_STATE_DIR"] = os.path.join(ROOT, "state")     # pushed.jsonl 不写真实 ~/.local/state
+os.environ["AI_HOME_NTFY_DRYRUN"] = "1"                          # ntfy 兜底只打印，测试绝不外发
 os.environ["DIBAO_WORKER"] = json.dumps([sys.executable, STUB])
 os.environ["DIBAO_RECOLLECT"] = json.dumps([sys.executable, "-c", "pass"])
 

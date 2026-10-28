@@ -5,3 +5,11 @@ sync_down_secs = 60         # git pull --rebase home-data 的周期
 push_debounce_secs = 60     # 本地提交后多久合并成一次 push
 worker_timeout = 30         # apply_card 子进程硬超时（秒）
 log_file = "~/Library/Logs/dibao/api.log"   # 1 MB × 3 轮转
+
+# APNs 推送（Charlie 建好 Auth Key 后再取消注释；删掉整段 = 回到 ntfy-only）
+# [apns]
+# key_id = "ABCDE12345"                      # Apple Developer → Keys 里的 Key ID
+# team_id = "Q8XV65MMXK"
+# bundle_id = "com.charliezong.menxia"
+# key_path = "~/.config/dibao/apns/AuthKey_ABCDE12345.p8"   # 权限 600；缺省即此路径
+# curl = "curl"                              # 必须支持 HTTP/2；系统 curl 不支持时填 /opt/homebrew/opt/curl/bin/curl
