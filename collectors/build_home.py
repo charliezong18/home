@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 from collect_countdown import next_date
+from life_ingest import load_life
 from common import (CACHE_DIR, DATA_DIR, SOURCES, commit_and_push, data_lock, git, log, now_iso,
                     read_json, snapshot_path, sync_down, write_json)
 
@@ -138,11 +139,17 @@ def main():
             readings = load_readings()
         except Exception as e:  # noqa: BLE001
             readings_err = str(e)[:200]
+        life, life_updated = [], None
+        try:
+            life, life_updated = load_life()
+        except Exception as e:  # noqa: BLE001
+            log(f"build: life.jsonl 读取失败：{str(e)[:200]}")
         sources = {}
         for s in SOURCES:
             st = status.get(s, {})
             snap = snaps.get(s)
             sources[s] = source_entry(s, st, snap, readings_err)
+        sources["life"]["updated"] = life_updated
         m = (snaps.get("menxia") or {}).get("data") or {}
         d = (snaps.get("dashboard") or {}).get("data") or {}
         ec = edit_counts()
@@ -158,7 +165,7 @@ def main():
             "library": m.get("library", []),
             "projects": d.get("cards", []),
             "readings": readings,
-            "due": due_items(snaps),
+            "due": due_items(snaps, life),
         }
         old_home, old_status = committed("home.json"), committed("status.json")
         changed = old_home is None or normalized(home, status) != normalized(old_home, old_status)

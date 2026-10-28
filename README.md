@@ -52,6 +52,19 @@ python3 ~/Developer/home/collectors/add_link.py 'https://example.com/post' '周�
 
 标题抓取 10 秒超时，失败用 URL 当标题（仍算成功）。同一 URL 不重复记。页面只读 `home.json`，所以链接要等下一轮 build 收录后才在页面出现——最长 30 分钟（急的话手动 `launchctl kickstart`）。
 
+## 日历 / Gmail 到期条目怎么来的（WP-08b）
+
+Hermes cron 每天 07:00 / 18:00（America/Los_Angeles）用 `hd.py create --template life` 派一个 Sonnet 会话，读 Google Calendar 未来 14 天与 Gmail 最近 3 天，写进 `life.jsonl`；`build_home.py` 把归并后 `status=open` 的条目并入 `due[]`（source 为 `calendar` / `gmail`）。写入口唯一是 `collectors/life_ingest.py`：
+
+```
+python3 collectors/life_ingest.py add --json '{"id":"d:cal-1a2b3c4d","title":"示例会议","date":"2026-11-05","note":"14:00","source":"calendar"}'
+python3 collectors/life_ingest.py done --id d:cal-1a2b3c4d
+python3 collectors/life_ingest.py list --window 14        # 只读
+# add/done 加 --no-git 只写文件不碰 git（测试用）
+```
+
+不存金额、邮件正文、发件人邮箱：`title`/`note` 里出现金额或 `@` 整批拒绝。Gmail 第一周只在 cron 报告里给「建议」，不入账（模板内开关，Charlie 点头后改模板）。
+
 ## 服务 dibao（#187 A 期·核心）
 
 Mac mini 常驻的标准库 HTTP 服务，`127.0.0.1:8766`，**不暴露、不鉴权、不托管页面**（#192 Q10=B：客户端只连 GitHub）。本地 home-data 工作树是真源，dibao 是本机唯一写者（上线前必须先停 `ai-home-edits`，否则双写）。
