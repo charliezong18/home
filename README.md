@@ -52,6 +52,39 @@ python3 ~/Developer/home/collectors/add_link.py 'https://example.com/post' '周�
 
 标题抓取 10 秒超时，失败用 URL 当标题（仍算成功）。同一 URL 不重复记。页面只读 `home.json`，所以链接要等下一轮 build 收录后才在页面出现——最长 30 分钟（急的话手动 `launchctl kickstart`）。
 
+## 服务 dibao（#187 A 期·核心）
+
+Mac mini 常驻的标准库 HTTP 服务，`127.0.0.1:8766`，**不暴露、不鉴权、不托管页面**（#192 Q10=B：客户端只连 GitHub）。本地 home-data 工作树是真源，dibao 是本机唯一写者（上线前必须先停 `ai-home-edits`，否则双写）。
+
+```
+客户端（网页 / iOS）──(PAT, contents API)──► GitHub review:home-data ◄──┐ push（≤60 s 防抖）
+Mac mini dibao :8766
+  ├─ 每 60 s git pull --rebase → 发现 pending 编辑 → 子进程落卡（30 s 硬超时）→ 重算 home.json
+  ├─ 本机 HTTP（Hermes / Claude）→ 写本地账本 → 立刻落卡、重算 ────────────┘
+```
+
+「保存即生效」：本机调用 POST 即生效；客户端经 GitHub 的写入最长 60 秒落卡。账本 jsonl 在 `.git/info/attributes` 里设 `merge=union`，两边同时追加末尾不冲突。复用 `collectors/` 的 `data_lock / sync_down / apply_edits.validate / build_home.main / add_link`，不复制逻辑；读写 vault 只在 `apply_edits --worker` 子进程里。
+
+| 方法 | 路径 | 行为 |
+|---|---|---|
+| GET | `/health` | `{ok, uptime_s, last_sync_down, last_push, pending_edits, vault_ok, version}` |
+| GET | `/v1/home.json` `/v1/status.json` | 本地文件，`ETag`（sha256 前 16 位），`If-None-Match` → 304 |
+| POST | `/v1/edits` | body = Edit 首行（`from`: `hermes`/`claude`）→ 校验 → 追加 → 同步落卡 → `200 {edit, project, generated}`；超时 `202 {edit:{state:"pending"}}`（60 s 内由同步循环补上）；校验不过 400 |
+| POST | `/v1/readings` | `{url, why}` → `201` Reading；URL 已在账本 → `200` 原记录 |
+| PATCH | `/v1/readings/{id}` | `{status}`（new/reading/done/dropped），id 可用账本 id 或 `r:…` |
+| GET | `/v1/notes/pending` | = `apply_edits --list-pending-notes` |
+| POST | `/v1/notes/{id}/done` | `{result}` = `--mark-done` |
+| POST | `/v1/collect` | `501 {error:"WP-09b"}` 占位 |
+
+```bash
+make install     # 建 ~/.config/dibao、~/Library/Logs/dibao，拷 plist，launchctl bootstrap，打 /health（由 Hermes 执行）
+make health / make uninstall / make test
+python3 service/cli.py health | edits --json '…' | readings --url URL | notes-pending | note-done ID
+python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<临时 git 仓> DIBAO_PORT=<端口>，绝不指向真实 review-home-data
+```
+
+配置 `~/.config/dibao/config.toml`（样例 `service/config.example.toml`），环境变量 `DIBAO_*` 优先。日志 `~/Library/Logs/dibao/api.log`，1 MB × 3 轮转。回滚：`launchctl bootout gui/$(id -u)/com.charlie.dibao`，把旧两个 plist 放回（WP-09b 的 `rollback`）。
+
 ## ID 约定
 
 页面上每条东西点开（或行首/行末的小 ID）都能复制一个短 ID，粘给 Hermes 就知道指哪一条。统一前缀、ASCII 前缀便于语音/复制：
