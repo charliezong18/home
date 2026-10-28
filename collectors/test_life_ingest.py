@@ -92,3 +92,14 @@ class CliSubprocessTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutoIdTest(unittest.TestCase):
+    def test_auto_id_stable(self):
+        import life_ingest as L
+        e = {"title": "示例：牙医复诊", "date": "2026-11-05", "source": "calendar"}
+        a, b = L.validate(dict(e)), L.validate(dict(e))
+        self.assertEqual(a["id"], b["id"])
+        self.assertRegex(a["id"], r"^d:cal-[0-9a-f]{8}$")
+        self.assertNotEqual(a["id"], L.validate({**e, "date": "2026-11-06"})["id"])
+
