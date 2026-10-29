@@ -118,7 +118,7 @@ python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<�
   | 采集连续失败 ≥3 | 重算后 `sources[*].consecutive_failures` | `fail-<源>-<日期>` | 邸报采集 <源> 连续失败 | `menxia://home` |
   | 到期当天 | 本地 07:30 起每天一次，扫 `projects[].deadline` 与 `due[].date` | `due-<id>-<日期>` | 今天截止：标题 | `menxia://home?id=<id>` |
 
-- **ntfy 兜底**：没有 active 设备（含未配置 `[apns]`）或所有设备都失败 → 同一条发到 `NTFY_URL`，`Click` 头带深链；APNs 至少一台成功就不发 ntfy。例外：采集失败事件**不**走 ntfy（`status.py` 在连败 3 次时已自己推过 ntfy，再发一遍是重复）。`AI_HOME_NTFY_DRYRUN=1` 时 ntfy 只打印。未送达的事件不记入去重集合，下次扫描重试。
+- **ntfy 兜底**：没有 active 设备（含未配置 `[apns]`）或所有设备都失败 → 同一条走 `collectors/notify.send` 发到 config.toml `[ntfy]` 段配的 topic（topic 是凭据，不进仓库；过渡期 `legacy_topic` 双发），`Click` 头带深链；APNs 至少一台成功就不发 ntfy。例外：采集失败事件**不**走 ntfy（`status.py` 在连败 3 次时已自己推过 ntfy，再发一遍是重复）。`AI_HOME_NTFY_DRYRUN=1` 时 ntfy 只打印。未送达的事件不记入去重集合，下次扫描重试。
 - **手动发一条（会真发）**：`python3 service/cli.py push-test --title 测试 --body 门下推送 --url 'menxia://home'`（走 `POST /v1/push/test`，所以 `/health.apns.last_push` 会更新）。`/health` 的 `apns` = `{configured, devices, last_push, last_error}`。
 
 ### 服务化切换步骤（给 Hermes）
