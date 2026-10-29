@@ -3,7 +3,7 @@
 ## 已完成（2026-10-13 22:13 PDT）
 - [x] 数据分支：`review` 孤儿分支 `home-data`（worktree `~/Developer/review-home-data`），README(schema)/config.yaml/readings.jsonl/home.json/status.json 已推
 - [x] 采集器：common / collect_menxia / collect_dashboard / add_link / status / build_home / run_all.sh
-- [x] 验收脚本：verify_counts.py（计数对照）、check_pages.py（Pages 轮询）、test_alert.py（告警 dry-run）
+- [x] 验收脚本：verify_counts.py（计数对照）、check_pages.py（Pages 轮询）、check_alert.py（告警 dry-run；原名 test_alert.py，改名免被 unittest/pytest 当测试收集）
 - [x] run_all 真跑：home.json 推上并经 contents API 读回；计数与 gh pr list 一致（35 open：你拍 9 / 你读 6 / agent 0 / 闲 20，读物 22）
 - [x] 内容不变不提交（第三轮起「内容未变，不提交」）
 - [x] add_link 实测（example.com → readings.jsonl → home.json readings:1），测试条目已追加 dropped 作废

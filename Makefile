@@ -27,6 +27,7 @@ health:
 
 test:
 	python3 -m unittest discover -s service/tests -v
+	python3 -m unittest discover -s collectors -p 'test_*.py' -v
 
 # 下线旧两个 launchd：先 install（bootstrap dibao 并 /health 通过），再 bootout 旧的，避免空窗。
 # 注意：dibao 的 install 已含 health；若 dibao 已在跑，install 的 bootstrap 会报错，此时手动 `make health` 通过后直接跑 retire-only 步骤。
