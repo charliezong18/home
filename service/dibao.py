@@ -52,6 +52,8 @@ class Service:
         self.svc = threading.RLock()            # 本进程内所有写操作串行；data_lock 只在单步 git/文件操作里短持
         self.stop = threading.Event()
         self.last_sync_down = self.last_push = None
+        self.last_sync_ok = self.last_sync_error = None    # 最近一轮 sync 的成败（None = 还没跑过）
+        self.last_push_ok = self.last_push_error = None
         self.pusher = sched.Pusher(self.do_push, cfg.push_debounce_secs)
         self.sched = sched.Scheduler(self)
         self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
@@ -149,12 +151,15 @@ class Service:
             with data_lock():
                 if git("status", "--porcelain").stdout.strip():
                     log.error("home-data 工作树不干净，本轮不拉")
+                    self.last_sync_ok, self.last_sync_error = False, "home-data 工作树不干净，本轮不拉"
                     return
                 before = self._head()
                 try:
                     sync_down()
+                    self.last_sync_ok, self.last_sync_error = True, None
                 except Exception as e:  # noqa: BLE001 — 断网不拖垮循环
                     log.warning("sync_down 失败：%s", str(e)[:200])
+                    self.last_sync_ok, self.last_sync_error = False, str(e)[:200]
                 after = self._head()
             self.last_sync_down = now_iso()
             done = self.process_pending()
@@ -168,8 +173,10 @@ class Service:
             r = git("push", "--quiet", "origin", f"HEAD:{BRANCH}", timeout=90, check=False)
         if r.returncode == 0:
             self.last_push = now_iso()
+            self.last_push_ok, self.last_push_error = True, None
             return True
         log.warning("push 失败（防抖线程会重试）：%s", r.stderr.strip()[:200])
+        self.last_push_ok, self.last_push_error = False, r.stderr.strip()[:200]
         return False
 
     # ---------- 后台线程 ----------
@@ -280,16 +287,32 @@ class Service:
             self.fire(lambda: self.notifier.note_done(eid, title, target))
         return 200, {"id": eid, "state": "done"}
 
+    def worktree_state(self):
+        """(dirty, rebasing)；不取 data_lock，git 读不到时 dirty 为 None。"""
+        gitdir = os.path.join(DATA_DIR, ".git")
+        rebasing = any(os.path.isdir(os.path.join(gitdir, d)) for d in ("rebase-merge", "rebase-apply"))
+        try:
+            r = git("--no-optional-locks", "status", "--porcelain", timeout=10, check=False)
+            dirty = bool(r.stdout.strip()) if r.returncode == 0 else None
+        except Exception:  # noqa: BLE001
+            dirty = None
+        return dirty, rebasing
+
     def health(self):
-        with data_lock():
-            pending = len(ledger.pending_edits(ledger.read_ledger(EDITS)))
+        # 不取 data_lock：账本只追加，读到半行 parse_lines 会跳过，最多少计一条
+        pending = len(ledger.pending_edits(ledger.read_ledger(EDITS)))
         try:
             import collect_dashboard as cd
             vault_ok = os.path.isdir(cd.VAULT_DASH)
         except Exception:  # noqa: BLE001
             vault_ok = False
-        return {"ok": True, "uptime_s": int(time.time() - self.started), "last_sync_down": self.last_sync_down,
-                "last_push": self.last_push, "pending_edits": pending, "vault_ok": vault_ok, "version": VERSION,
+        dirty, rebasing = self.worktree_state()
+        ok = self.last_sync_ok is not False and self.last_push_ok is not False and dirty is False and not rebasing
+        return {"ok": ok, "uptime_s": int(time.time() - self.started), "last_sync_down": self.last_sync_down,
+                "last_sync_ok": self.last_sync_ok, "last_sync_error": self.last_sync_error,
+                "last_push": self.last_push, "last_push_ok": self.last_push_ok, "last_push_error": self.last_push_error,
+                "worktree_dirty": dirty, "rebasing": rebasing,
+                "pending_edits": pending, "vault_ok": vault_ok, "version": VERSION,
                 "last_collect": self.sched.last_collect, "collect_failures": self.sched.collect_failures,
                 "push_failures": self.pusher.failures, "apns": self.notifier.health()}
 

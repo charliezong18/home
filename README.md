@@ -80,7 +80,7 @@ Mac mini dibao :8766
 
 | 方法 | 路径 | 行为 |
 |---|---|---|
-| GET | `/health` | `{ok, uptime_s, last_sync_down, last_push, pending_edits, vault_ok, version, last_collect, collect_failures, push_failures, apns:{configured, devices, last_push, last_error}}` |
+| GET | `/health` | `{ok, uptime_s, last_sync_down, last_sync_ok, last_sync_error, last_push, last_push_ok, last_push_error, worktree_dirty, rebasing, pending_edits, vault_ok, version, last_collect, collect_failures, push_failures, apns:{configured, devices, last_push, last_error}}`；不取数据锁。`ok` = 最近一轮 sync 与 push 均未失败、工作树干净且不在 rebase 中（`*_ok` 为 `null` 表示还没跑过） |
 | GET | `/v1/home.json` `/v1/status.json` | 本地文件，`ETag`（sha256 前 16 位），`If-None-Match` → 304 |
 | POST | `/v1/edits` | body = Edit 首行（`from`: `hermes`/`claude`）→ 校验 → 追加 → 同步落卡 → `200 {edit, project, generated}`；超时 `202 {edit:{state:"pending"}}`（60 s 内由同步循环补上）；校验不过 400 |
 | POST | `/v1/readings` | `{url, why}` → `201` Reading；URL 已在账本 → `200` 原记录 |

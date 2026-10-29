@@ -179,6 +179,128 @@ class SyncTest(unittest.TestCase):
         svc.do_push()                                                      # 防抖线程干的事：推回 GitHub
         self.assertEqual(sh("git", "-C", _env.DATA, "rev-list", "--count", "origin/home-data..HEAD").strip(), "0")
         self.assertIsNotNone(svc.last_push)
+        h = svc.health()
+        self.assertEqual((h["ok"], h["last_sync_ok"], h["last_push_ok"], h["worktree_dirty"], h["rebasing"]),
+                         (True, True, True, False, False))
+
+
+class HealthSyncStateTest(unittest.TestCase):
+    """/health 暴露同步成败；不取 data_lock。验收用例 = 2026-10-28 12:03 那次 sync_down 网络超时。"""
+
+    TIMEOUT_ERR = ("git -C /Users/x/review-home-data pull --rebase --quiet origin home-data -> rc=1: "
+                   "fatal: unable to access 'https://github.com/x/y.git/': Recv failure: Operation timed out")
+
+    def setUp(self):
+        self.svc = dibao.Service(_cfg(), push=False)
+        self.orig = dibao.sync_down
+
+    def tearDown(self):
+        dibao.sync_down = self.orig
+
+    def _raise_timeout(self):
+        raise RuntimeError(self.TIMEOUT_ERR)
+
+    def test_sync_down_timeout_visible_then_recovers(self):
+        dibao.sync_down = self._raise_timeout
+        self.svc.sync_cycle()
+        h = self.svc.health()
+        self.assertFalse(h["ok"])
+        self.assertFalse(h["last_sync_ok"])
+        self.assertIn("Operation timed out", h["last_sync_error"])
+        self.assertLessEqual(len(h["last_sync_error"]), 200)
+        self.assertEqual(h["worktree_dirty"], False)
+        dibao.sync_down = lambda: None                                     # 下一轮网络恢复 → 自愈
+        self.svc.sync_cycle()
+        h = self.svc.health()
+        self.assertTrue(h["ok"])
+        self.assertTrue(h["last_sync_ok"])
+        self.assertIsNone(h["last_sync_error"])
+
+    def test_dirty_worktree_reported(self):
+        stray = os.path.join(_env.DATA, "stray.txt")
+        with open(stray, "w") as f:
+            f.write("x")
+        try:
+            self.svc.sync_cycle()
+            h = self.svc.health()
+            self.assertEqual((h["ok"], h["last_sync_ok"], h["worktree_dirty"]), (False, False, True))
+            self.assertIn("不干净", h["last_sync_error"])
+        finally:
+            os.remove(stray)
+        self.assertEqual(self.svc.health()["worktree_dirty"], False)
+
+    def test_push_failure_reported(self):
+        orig_git = dibao.git
+
+        def fake_git(*args, **kw):
+            if args and args[0] == "push":
+                return type("R", (), {"returncode": 128, "stderr": "fatal: unable to access: Operation timed out\n"})()
+            return orig_git(*args, **kw)
+        dibao.git = fake_git
+        try:
+            self.assertFalse(self.svc.do_push())
+        finally:
+            dibao.git = orig_git
+        h = self.svc.health()
+        self.assertEqual((h["ok"], h["last_push_ok"]), (False, False))
+        self.assertIn("Operation timed out", h["last_push_error"])
+
+    def test_health_does_not_take_data_lock(self):
+        held, release = threading.Event(), threading.Event()
+
+        def hold():
+            with dibao.data_lock():
+                held.set()
+                release.wait(10)
+        t = threading.Thread(target=hold, daemon=True)
+        t.start()
+        self.assertTrue(held.wait(5))
+        out = {}
+        h = threading.Thread(target=lambda: out.setdefault("h", self.svc.health()), daemon=True)
+        h.start()
+        h.join(3)
+        release.set()
+        t.join(5)
+        self.assertIn("h", out, "health() 被 data_lock 卡住了")
+
+
+class CliErrorTest(unittest.TestCase):
+    """cli 连不上 / 超时：输出 JSON 错误、退出码 1，不抛 traceback。"""
+
+    def _run(self, port):
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = cli.main(["--port", str(port), "health"])
+        return rc, json.loads(buf.getvalue()[buf.getvalue().index("{"):])
+
+    def test_connection_refused(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()                                                           # 端口空着 → 连接被拒
+        rc, out = self._run(port)
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["ok"])
+        self.assertTrue(out["error"])
+
+    def test_timeout(self):
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        s.listen(1)                                                         # 接受连接但永不回话
+        orig = cli.TIMEOUT
+        cli.TIMEOUT = 0.5
+        try:
+            rc, out = self._run(s.getsockname()[1])
+        finally:
+            cli.TIMEOUT = orig
+            s.close()
+        self.assertEqual(rc, 1)
+        self.assertFalse(out["ok"])
+        self.assertIn("timed out", out["error"])
 
 
 if __name__ == "__main__":

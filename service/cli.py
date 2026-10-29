@@ -8,7 +8,7 @@
   cli.py note-done --id ID [--result 文本]
   cli.py collect [--sources menxia,dashboard]     立即触发一轮采集，返回 job id（GET /v1/collect/{job} 查）
   cli.py push-test [--title T] [--body B] [--url menxia://home]   手动发一条推送（APNs，无设备则 ntfy）；会真发，验收用
-输出响应 JSON；HTTP 非 2xx 退出码 1。
+输出响应 JSON；HTTP 非 2xx 退出码 1。连不上 / 超时输出 {"ok": false, "error": …}，退出码 1。
 """
 import argparse
 import json
@@ -16,16 +16,22 @@ import sys
 import urllib.error
 import urllib.request
 
+TIMEOUT = 60
+
 
 def call(port, method, path, body=None):
+    """返回 (HTTP 状态码, JSON)；连接失败 / 超时返回 (None, {"ok": False, "error": …})。"""
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method,
                                  headers={"Content-Type": "application/json"} if data else {})
     try:
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return r.status, json.loads(r.read() or b"null")
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"null")
+    except (urllib.error.URLError, OSError) as e:      # 连接被拒（服务没起）、超时
+        reason = getattr(e, "reason", None) or e
+        return None, {"ok": False, "error": f"{type(reason).__name__}: {reason}"[:300]}
 
 
 def main(argv=None):
@@ -63,9 +69,9 @@ def main(argv=None):
         code, out = call(a.port, "POST", "/v1/collect", {"sources": srcs} if srcs else {})
     else:
         code, out = call(a.port, "POST", f"/v1/notes/{a.id}/done", {"result": a.result})
-    print(f"HTTP {code}")
+    print(f"HTTP {code}" if code else "HTTP -（未连上 dibao）")
     print(json.dumps(out, ensure_ascii=False, indent=2))
-    return 0 if 200 <= code < 300 else 1
+    return 0 if code and 200 <= code < 300 else 1
 
 
 if __name__ == "__main__":
