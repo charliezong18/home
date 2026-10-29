@@ -6,6 +6,12 @@ push_debounce_secs = 60     # 本地提交后多久合并成一次 push
 worker_timeout = 30         # apply_card 子进程硬超时（秒）
 log_file = "~/Library/Logs/dibao/api.log"   # 1 MB × 3 轮转
 
+# ntfy 推送（status.py / 调度 / APNs 兜底共用 collectors/notify.py）。topic 是凭据：只写在本机 config.toml，chmod 600
+# [ntfy]
+# topic = "dibao-<随机串>"                    # python3 -c 'import secrets; print("dibao-" + secrets.token_urlsafe(18))'
+# legacy_topic = "..."                       # 可选：换 topic 过渡期双发，手机订阅新 topic 后删掉
+# server = "https://ntfy.sh"                 # 可选
+
 # APNs 推送（Charlie 建好 Auth Key 后再取消注释；删掉整段 = 回到 ntfy-only）
 # [apns]
 # key_id = "ABCDE12345"                      # Apple Developer → Keys 里的 Key ID
