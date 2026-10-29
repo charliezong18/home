@@ -13,7 +13,6 @@ CACHE_DIR = os.environ.get("AI_HOME_CACHE", os.path.join(HOME, "Library/Caches/a
 LOCK_FILE = os.path.join(CACHE_DIR, "git.lock")
 REPO = "charliezong18/review"
 BRANCH = "home-data"
-NTFY_URL = "https://ntfy.sh/charlie-claude-notify-6d4720"
 SOURCES = ["menxia", "dashboard", "readings", "countdown", "backlog", "life"]
 VAULT = os.environ.get("AI_HOME_VAULT", "/Users/charliezong/Sync/My Drive/2nd Brain/Hang")
 COUNTDOWN_REL = "倒数日.md"

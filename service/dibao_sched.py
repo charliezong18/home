@@ -22,18 +22,9 @@ log = logging.getLogger("dibao.sched")
 
 
 def notify(text, today):
-    """沿用 status.py 的 ntfy 渠道与 AI_HOME_NTFY_DRYRUN 开关；失败只记日志。"""
-    from common import NTFY_URL
-    if os.environ.get("AI_HOME_NTFY_DRYRUN") == "1":
-        log.warning("[dry-run] 本应推送 ntfy：%s", text)
-        return True
-    try:
-        r = subprocess.run(["curl", "-sS", "-m", "15", "-H", "Title: AI home dibao", "-d", text, NTFY_URL],
-                           capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log.warning("ntfy 推送失败：%s", e)
-        return False
-    return r.returncode == 0
+    """走 collectors/notify.send（含 AI_HOME_NTFY_DRYRUN 开关）；失败只记日志。"""
+    import notify as ntfy
+    return ntfy.send(text, title="AI home dibao")
 
 
 class Pusher:

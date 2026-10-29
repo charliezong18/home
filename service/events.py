@@ -6,7 +6,6 @@
 import json
 import logging
 import os
-import subprocess
 import threading
 import time
 from urllib.parse import quote
@@ -25,20 +24,9 @@ def state_path():
 
 
 def default_ntfy(text, url):
-    """沿用 dibao_sched.notify 的 ntfy 渠道与 AI_HOME_NTFY_DRYRUN 开关；Click 头带 url。"""
-    from common import NTFY_URL
-    if os.environ.get("AI_HOME_NTFY_DRYRUN") == "1":
-        log.warning("[dry-run] 本应推送 ntfy：%s %s", text, url)
-        return True
-    cmd = ["curl", "-sS", "-m", "15", "-H", "Title: AI home dibao"]
-    if url:
-        cmd += ["-H", f"Click: {url}"]
-    try:
-        r = subprocess.run(cmd + ["-d", text, NTFY_URL], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        log.warning("ntfy 推送失败：%s", e)
-        return False
-    return r.returncode == 0
+    """走 collectors/notify.send（含 AI_HOME_NTFY_DRYRUN 开关）；Click 头带 url。"""
+    import notify
+    return notify.send(text, title="AI home dibao", click=url)
 
 
 def home_url(item_id):
