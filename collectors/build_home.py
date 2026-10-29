@@ -25,14 +25,22 @@ LEDGER = os.path.join(DATA_DIR, "readings.jsonl")
 
 
 def load_readings():
-    latest = {}
+    """→ (读物列表, 坏行数)。坏行（非 JSON / 非对象 / 缺 id）跳过并记日志，不拖垮整本账；读不出文件才抛。"""
+    latest, bad = {}, 0
     if os.path.exists(LEDGER):
         with open(LEDGER, encoding="utf-8") as f:
-            for line in f:
+            for n, line in enumerate(f, 1):
                 line = line.strip()
                 if not line:
                     continue
-                e = json.loads(line)  # 坏行直接抛，交给 run_all 记 readings 源失败
+                try:
+                    e = json.loads(line)
+                except ValueError:
+                    e = None
+                if not isinstance(e, dict) or not e.get("id"):
+                    bad += 1
+                    log(f"build: readings.jsonl 第 {n} 行无效，跳过")
+                    continue
                 latest[e["id"]] = {**latest.get(e["id"], {}), **e}  # 同 id 后者生效
     out = []
     today = dt.date.today()
@@ -45,7 +53,7 @@ def load_readings():
         except ValueError:
             e["folded"] = False
         out.append(e)
-    return sorted(out, key=lambda x: x.get("ts", x.get("added", "")), reverse=True)
+    return sorted(out, key=lambda x: x.get("ts", x.get("added", "")), reverse=True), bad
 
 
 def slug(s):
@@ -134,11 +142,16 @@ def main():
     with data_lock():
         sync_down()
         snaps = {s: read_json(snapshot_path(s)) for s in ("menxia", "dashboard", "countdown", "backlog")}
+        old_home, old_status = committed("home.json"), committed("status.json")
         readings, readings_err = [], ""
         try:
-            readings = load_readings()
+            readings, bad = load_readings()
+            if bad:
+                readings_err = f"readings.jsonl 有 {bad} 行无效，已跳过"
         except Exception as e:  # noqa: BLE001
             readings_err = str(e)[:200]
+            readings = (old_home or {}).get("readings", [])  # 读不出账本：沿用上一份，不写空列表
+            log(f"build: readings.jsonl 读取失败，沿用上一份 {len(readings)} 条：{readings_err}")
         life, life_updated = [], None
         try:
             life, life_updated = load_life()
@@ -167,7 +180,6 @@ def main():
             "readings": readings,
             "due": due_items(snaps, life),
         }
-        old_home, old_status = committed("home.json"), committed("status.json")
         changed = old_home is None or normalized(home, status) != normalized(old_home, old_status)
         stale = True
         if old_home and old_home.get("generated"):
