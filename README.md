@@ -42,6 +42,9 @@ Hermes 丢链接 → collectors/add_link.py <url> [附言] → readings.jsonl �
 | `library` | 弘文馆 = open 且 `kind:读物` |
 | `projects` | Dashboard 卡：frontmatter + `## 现状` 首段 + 里程碑勾选比例 |
 | `readings` | `readings.jsonl` 按 id 归并、去掉 done/dropped；超 30 天 `folded` |
+| `todos` | Google Tasks「今日待办」（My Tasks，只读）：`today` / `overdue`（due 升序）/ `nodate`（≤20 条），`counts` 为真实总数；只含未完成、不含 notes、title ≤80 字，「今天」按 America/Los_Angeles；`error` 非空 = 本轮同步失败、内容是上次成功的；从没采过则无此键，页面不显示该栏 |
+
+`todos` 由 `collectors/collect_gtasks.py` 采集：调本机已授权的 `gog tasks list @default --json`（`@default` = My Tasks，可用 `AI_HOME_GTASKS_LIST` 换；分页，每页 100，30 s 超时），只读，不建/改/完成任务；快照只存 id/title/due。分段在 build 时现算，所以采集失败时分段仍按当天。只读演练：`python3 collectors/collect_gtasks.py --dry-run`（只打印三段计数）。
 
 ## 丢链接 CLI（给 Hermes 调）
 
