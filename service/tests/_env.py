@@ -16,6 +16,19 @@ REMOTE = os.path.join(ROOT, "remote.git")
 STUB = os.path.join(ROOT, "stub_worker.py")
 SNAP = os.path.join(CACHE, "snapshot-dashboard.json")
 
+# git 环境隔离：测试里的 git 不认外部仓库 / 全局配置。
+#   · 从 git hook 里跑（GIT_DIR / GIT_INDEX_FILE 等已导出）时，git -C DATA 会改到外层仓库；
+#   · ~/.gitconfig 的 commit.gpgsign / insteadOf / hooksPath 等会让结果随机器而变。
+for _k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+           "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_CEILING_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+           "GIT_CONFIG_COUNT"):
+    os.environ.pop(_k, None)
+GITCONFIG = os.path.join(ROOT, "gitconfig")
+with open(GITCONFIG, "w") as _f:
+    _f.write("[user]\n\tname = t\n\temail = t@example.com\n[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n")
+os.environ["GIT_CONFIG_GLOBAL"] = GITCONFIG
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+os.environ["GIT_TERMINAL_PROMPT"] = "0"
 os.environ["AI_HOME_DATA"] = DATA
 os.environ["AI_HOME_CACHE"] = CACHE
 os.environ["DIBAO_CONFIG"] = os.path.join(ROOT, "no-such-config.toml")
@@ -49,7 +62,9 @@ json.dump(out, sys.stdout)
 
 
 def sh(*cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=True).stdout
+    """跑命令，失败抛 CalledProcessError。cwd 缺省 = ROOT（本进程的临时目录，整个进程期间都在）：
+    不继承调用方的 cwd——cwd 已被删除 / 替换时 `git clone` 会在 checkout 阶段以 128 退出（见 test_http.SyncTest）。"""
+    return subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True, text=True, check=True).stdout
 
 
 def setup():
