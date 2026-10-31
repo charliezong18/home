@@ -52,6 +52,19 @@
       <h3 class="sub" id="overdue-h">过期待处理 <b id="overdue-n">0</b></h3>
       <ul id="overdue"></ul>
       <p class="empty"><b>项目截止 · 倒数日 · 有窗口的 Backlog</b>已接入；账单 · 日历 Phase 2 接入，过期标朱色。</p>
+      <!-- 今日待办 = Google Tasks（home.json 的 todos）；没有 todos 键时整块隐藏（旧数据兼容） -->
+      <div class="todos" id="todos-wrap" hidden>
+        <h2>今日待办 <span class="src" data-src="gtasks" id="todos-src"></span></h2>
+        <p class="empty warn" id="todos-err" hidden></p>
+        <h3 class="sub">今天到期 <b id="todos-today-n">0</b></h3>
+        <ul id="todos-today"></ul>
+        <h3 class="sub">已过期 <b id="todos-overdue-n">0</b></h3>
+        <ul id="todos-overdue"></ul>
+        <details id="todos-nodate-box">
+          <summary class="sub">无截止日 <b id="todos-nodate-n">0</b></summary>
+          <ul id="todos-nodate"></ul>
+        </details>
+      </div>
     </aside>
   </section>
 

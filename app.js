@@ -114,6 +114,15 @@ function demoData() {
       { id: 'p:示例-刚过期', title: '示例刚过期（不进分区）', icon: '⏳', tier: 'build', status: 'active', state: 'active', next: '收尾', deadline: day(-5), deadline_note: '截止', updated: day(-6), progress: 80, sections: {} },
     ],
     due: new URLSearchParams(location.search).has('nodue') ? undefined : due,
+    // &notodos=1 去掉 todos（旧数据：栏应整块不显示）；&todoserr=1 模拟采集失败（保留上次数据 + 提示）
+    todos: new URLSearchParams(location.search).has('notodos') ? undefined : {
+      source: 'google-tasks', list: 'My Tasks', synced_at: new Date().toISOString(),
+      error: new URLSearchParams(location.search).has('todoserr') ? 'gtasks FAIL: 示例错误' : null,
+      today: [{ id: 'demo-t1', title: '示例：交周报', due: day(0) }, { id: 'demo-t2', title: '示例：回邮件', due: day(0) }],
+      overdue: [{ id: 'demo-t3', title: '示例：续订会员', due: day(-9) }, { id: 'demo-t4', title: '示例：取快递', due: day(-1) }],
+      nodate: [{ id: 'demo-t5', title: '示例：整理照片', due: null }, { id: 'demo-t6', title: '示例：换灯泡', due: null }],
+      counts: { today: 2, overdue: 2, nodate: 23 },
+    },
   };
 }
 
@@ -359,6 +368,8 @@ function render(data) {
     : [h('li', { class: 'empty' }, '没有过期待处理的事。')]),
   ...(overdueItems.length > CAP.overdue ? [h('li', { class: 'empty' }, `还有 ${overdueItems.length - CAP.overdue} 件 · 见 Obsidian Dashboard`)] : []));
 
+  renderTodos(data);
+
   // Q2 折务：待你拍 / 待你读 / 等 agent，等得久的在前，单行
   $('folder-sum').textContent = `共 ${(data.folders || {}).total ?? 0} 折`;
   const fkids = [];
@@ -409,6 +420,44 @@ function render(data) {
     ? links.slice(0, CAP.links).map((r) => row('link', `${r.title || r.url}${r.why ? ` —「${r.why}」` : ''}`, r.url, r.added ? md(r.added) : '', { id: r.rid, wide: !!r.rid, label: r.title || r.url, actions: r.id ? readingActions(r) : null }))
     : [empty('还没丢过链接', '在任何 App 分享给 Telegram 里的 Hermes，会出现在这里。')]),
   ...[more(links.length - CAP.links, '条')].filter(Boolean));
+}
+
+// 今日待办（Google Tasks，home.json 的 todos）：今天到期 / 已过期 / 无截止日（默认折叠）。
+// 没有 todos 键（旧数据）→ 整块隐藏；error 非空 → 显示上次成功的数据 + 一行提示；某段缺失按空处理。
+// 只读展示：不提供完成 / 编辑按钮（任务在 Google Tasks 里办）。
+function renderTodos(data) {
+  const t = data.todos;
+  const wrap = $('todos-wrap');
+  if (!wrap) return;
+  if (!t || typeof t !== 'object') { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  const list = (k) => (Array.isArray(t[k]) ? t[k].filter((x) => x && typeof x.title === 'string') : []);
+  const counts = t.counts || {};
+  const n = (k) => (Number.isFinite(+counts[k]) && counts[k] != null ? +counts[k] : list(k).length);
+  const src = $('todos-src');
+  const synced = t.synced_at ? ago(t.synced_at) : '未同步';
+  src.textContent = t.error ? `停在 ${synced}` : synced;
+  src.title = t.error ? `Google Tasks 同步失败，显示的是上次成功的数据（${t.error}）` : `Google Tasks 同步于 ${t.synced_at || '未知'}`;
+  src.setAttribute('aria-label', src.title);
+  src.classList.toggle('stale', !!t.error || !t.synced_at);
+  const err = $('todos-err');
+  err.hidden = !t.error;
+  err.textContent = t.error ? `⚠ 同步失败，显示上次的数据：${t.error}` : '';
+  const fill = (k, emptyText, cls) => {
+    const items = list(k);
+    $(`todos-${k}-n`).textContent = String(n(k));
+    $(`todos-${k}`).replaceChildren(...(items.length ? items.map((x) => {
+      const dated = /^\d{4}-\d{2}-\d{2}$/.test(x.due || '');
+      const days = dated ? daysUntil(x.due) : NaN;
+      return h('li', { class: cls, 'data-id': x.id || null },
+        h('span', { class: 'd' }, dated ? md(x.due) : '—'),
+        h('span', { class: 't' }, x.title, k === 'overdue' && Number.isFinite(days) && days < 0 ? h('span', { class: 'm' }, `已过 ${-days} 天`) : null));
+    }) : [h('li', { class: 'empty' }, emptyText)]),
+    ...(n(k) > items.length ? [h('li', { class: 'empty' }, `还有 ${n(k) - items.length} 件 · 见 Google Tasks`)] : []));
+  };
+  fill('today', '今天没有到期的待办。', 'soon');
+  fill('overdue', '没有过期的待办。', 'over');
+  fill('nodate', '没有无截止日的待办。', '');
 }
 
 // 行内 markdown 最小渲染：**粗体** `code` [[wikilink]]→文本 裸 URL→链接。直接建 DOM 节点（textContent），天然不经 HTML 解析

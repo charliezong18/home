@@ -118,6 +118,11 @@ dialog header .cid { margin-left: var(--s2); vertical-align: middle; }
 .empty b { display: block; color: var(--text-2); font-weight: 500; }
 .due .empty { border-bottom: 0; margin-top: var(--s2); }
 .due li.empty { display: block; border-bottom: 1px solid var(--line); margin-top: 0; }
+/* 今日待办（Google Tasks）：沿用 .due 的行样式；无截止日默认折叠 */
+.todos { margin-top: var(--s5); }
+.todos .warn { color: var(--amber); }
+.todos summary.sub { display: list-item; cursor: pointer; }
+.todos summary.sub b { margin-left: var(--s2); }
 
 .foot { margin-top: var(--s4); padding-top: var(--s2); border-top: 3px double var(--line-strong); display: flex; justify-content: space-between; gap: var(--s4); font-size: var(--fs-12); color: var(--text-3); }
 .status { color: var(--text-2); }

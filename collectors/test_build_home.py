@@ -89,6 +89,21 @@ class BuildHomeReadingsTest(unittest.TestCase):
         home = self.home()
         self.assertTrue(home["sources"]["readings"]["ok"])
         self.assertEqual([r["rid"] for r in home["readings"]], ["r:a"])
+        self.assertNotIn("todos", home)   # 没有 gtasks 快照、也没失败过 → 不写 todos 键
+
+    def test_main_todos_from_snapshot_with_error(self):
+        self.write_ledger(json.dumps(reading("link-a", "A")))
+        today = build_home.collect_gtasks.la_today().isoformat()
+        common.write_json(os.path.join(self.cache, "snapshot-gtasks.json"), {"source": "gtasks", "fetched": "2026-10-31T18:00:00Z",
+                          "data": {"tasks": [{"id": "t1", "title": "示例待办", "due": today}, {"id": "t2", "title": "示例无日期", "due": None}]}})
+        common.write_json(os.path.join(self.cache, "status.json"),
+                          {"gtasks": {"consecutive_failures": 1, "last_error_msg": "gtasks FAIL: gog rc=1"}})
+        self.assertEqual(build_home.main(), 0)
+        t = self.home()["todos"]
+        self.assertEqual(t["counts"], {"today": 1, "overdue": 0, "nodate": 1})   # 失败仍保留上次成功的数据
+        self.assertEqual(t["error"], "gtasks FAIL: gog rc=1")
+        self.assertEqual(t["synced_at"], "2026-10-31T18:00:00Z")
+        self.assertFalse(self.home()["sources"]["gtasks"]["ok"])
 
     def test_main_unreadable_ledger_keeps_previous_readings(self):
         self.write_ledger(json.dumps(reading("link-a", "A")))
