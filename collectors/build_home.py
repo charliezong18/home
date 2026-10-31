@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 
+import collect_gtasks
 from collect_countdown import next_date
 from life_ingest import load_life
 from common import (CACHE_DIR, DATA_DIR, SOURCES, commit_and_push, data_lock, git, log, now_iso,
@@ -113,6 +114,8 @@ def normalized(home, status):
     h.pop("generated", None)
     for s in h.get("sources", {}).values():
         s.pop("updated", None)
+    if isinstance(h.get("todos"), dict):
+        h["todos"].pop("synced_at", None)   # 同 sources.updated：只有时间戳变不算内容变
     st = {k: {kk: vv for kk, vv in v.items() if kk != "last_ok"} for k, v in (status or {}).items()}
     return json.dumps([h, st], sort_keys=True, ensure_ascii=False)
 
@@ -141,7 +144,7 @@ def main():
     status = read_json(os.path.join(CACHE_DIR, "status.json"), {}) or {}
     with data_lock():
         sync_down()
-        snaps = {s: read_json(snapshot_path(s)) for s in ("menxia", "dashboard", "countdown", "backlog")}
+        snaps = {s: read_json(snapshot_path(s)) for s in ("menxia", "dashboard", "countdown", "backlog", "gtasks")}
         old_home, old_status = committed("home.json"), committed("status.json")
         readings, readings_err = [], ""
         try:
@@ -180,6 +183,10 @@ def main():
             "readings": readings,
             "due": due_items(snaps, life),
         }
+        # Google Tasks「今日待办」：独立于 due[]；从没采过就不写这个键（客户端据此不显示该栏）
+        todos = collect_gtasks.from_snapshot(snaps.get("gtasks"), status.get("gtasks"), collect_gtasks.la_today())
+        if todos is not None:
+            home["todos"] = todos
         changed = old_home is None or normalized(home, status) != normalized(old_home, old_status)
         stale = True
         if old_home and old_home.get("generated"):

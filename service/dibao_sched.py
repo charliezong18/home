@@ -14,7 +14,8 @@ import uuid
 HERE = os.path.dirname(os.path.abspath(__file__))
 COLLECTORS = os.path.join(os.path.dirname(HERE), "collectors")
 SOURCES = {"menxia": "collect_menxia.py", "dashboard": "collect_dashboard.py",
-           "countdown": "collect_countdown.py", "backlog": "collect_backlog.py"}  # keep in sync with collectors/run_all.sh
+           "countdown": "collect_countdown.py", "backlog": "collect_backlog.py",
+           "gtasks": "collect_gtasks.py"}  # keep in sync with collectors/run_all.sh
 COLLECT_TIMEOUT = 120
 MAX_JOBS = 50
 PUSH_ALERT_AFTER = 3
