@@ -99,8 +99,8 @@ def data_lock():
 
 
 def sync_down():
-    """拉远端 home-data（远端还没有该分支时跳过）。"""
-    r = git("ls-remote", "--heads", "origin", BRANCH, check=False)
+    """拉远端 home-data（远端还没有该分支时跳过）。远端不可达时抛 RuntimeError，不能当成「没有该分支」。"""
+    r = git("ls-remote", "--heads", "origin", BRANCH)
     if BRANCH in (r.stdout or ""):
         git("pull", "--rebase", "--quiet", "origin", BRANCH)
 

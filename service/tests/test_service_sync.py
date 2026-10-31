@@ -154,6 +154,18 @@ class ServiceSyncTest(unittest.TestCase):
         self.svc.sync_cycle()
         self.assertTrue(self.svc.health()["last_sync_ok"])
 
+    def test_unreachable_remote_reported_as_sync_failure(self):
+        """远端不可达（断网 / 仓库地址失效）：/health 必须报 sync 失败，而不是当成「远端还没有该分支」静默跳过。"""
+        sh("git", "-C", self.data, "remote", "set-url", "origin", os.path.join(self.tmp, "gone.git"))
+        self.svc.sync_cycle()
+        h = self.svc.health()
+        self.assertFalse(h["last_sync_ok"])
+        self.assertFalse(h["ok"])
+        self.assertTrue(h["last_sync_error"])
+        sh("git", "-C", self.data, "remote", "set-url", "origin", self.remote)  # 恢复 → 自愈
+        self.svc.sync_cycle()
+        self.assertTrue(self.svc.health()["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

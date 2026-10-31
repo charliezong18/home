@@ -71,11 +71,13 @@ class GitSyncTest(unittest.TestCase):
         common.sync_down()                                                   # 不抛
         self.assertEqual(gf.rev(self.data), head)
 
-    def test_sync_down_unreachable_remote_is_silent_noop(self):
-        # ls-remote 失败（check=False）→ 当作远端没有该分支，跳过；dibao 靠 push 失败暴露问题
+    def test_sync_down_unreachable_remote_raises(self):
+        # 远端不可达 ≠ 远端没有该分支：必须抛出，dibao /health 才能报 sync 失败
         gf.sh("git", "-C", self.data, "remote", "set-url", "origin", os.path.join(self.tmp, "missing.git"))
         head = gf.rev(self.data)
-        common.sync_down()
+        with self.assertRaises(RuntimeError) as cm:
+            common.sync_down()
+        self.assertIn("ls-remote", str(cm.exception))
         self.assertEqual(gf.rev(self.data), head)
 
     def test_sync_down_conflict_raises(self):
