@@ -14,6 +14,7 @@ import logging
 import logging.handlers
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -31,6 +32,7 @@ import config  # noqa: E402
 import ledger  # noqa: E402
 import apns  # noqa: E402
 import events  # noqa: E402
+import todo_actions  # noqa: E402
 import dibao_sched as sched  # noqa: E402  (renamed: avoid shadowing stdlib sched)
 from common import BRANCH, DATA_DIR, data_lock, git, now_iso, read_json, sync_down  # noqa: E402
 
@@ -40,6 +42,7 @@ READINGS = os.path.join(DATA_DIR, "readings.jsonl")
 HOME_JSON = os.path.join(DATA_DIR, "home.json")
 STATUS_JSON = os.path.join(DATA_DIR, "status.json")
 DEVICES = os.path.join(DATA_DIR, "devices.jsonl")
+TODO_ACTIONS = os.path.join(DATA_DIR, "todo-actions.jsonl")
 DUE_SCAN_AT = (7, 30)                    # 本地时间；晚于此启动则当天补扫一次（键里带日期，不会重复推）
 MAX_BODY = 64 * 1024
 log = logging.getLogger("dibao")
@@ -58,6 +61,8 @@ class Service:
         self.sched = sched.Scheduler(self)
         self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
         self.due_done = None
+        self.todo_runner = subprocess.run                 # gog 子进程入口；测试换成假 gog
+        self.recollect_gtasks = lambda: self.sched.run_source("gtasks")  # 勾完后立刻重采 gtasks；测试可换
         # build_home 直接 import 复用，但它的 sync_down / commit_and_push 换成本服务的（只本地提交，push 走防抖线程）
         build_home.sync_down = lambda: None
         build_home.commit_and_push = self._commit
@@ -146,6 +151,53 @@ class Service:
         self.rebuild()
         return lines
 
+    def process_todos(self):
+        """执行 todo-actions.jsonl 里未处理的勾完成 / 撤销。返回 {id: 状态行}。每条只执行一次，失败不重试。"""
+        with self.svc:
+            with data_lock():
+                _, _, todo = todo_actions.summarize(todo_actions.read_records(TODO_ACTIONS), todo_actions.local_done())
+            if not todo:
+                return {}
+            lines = {}
+            for a in todo:                                   # 文件顺序：先勾后撤销 = 最终未完成
+                state, detail = todo_actions.execute(a, self.todo_runner)
+                line = todo_actions.state_line(a["id"], state, detail, now_iso())
+                todo_actions.remember(line)
+                lines[a["id"]] = line
+                log.info("todo %s %s %s → %s %s", a["id"], a.get("op"), a.get("task_id"), state, detail)
+            with data_lock():
+                for line in lines.values():
+                    ledger.append(TODO_ACTIONS, line)
+                self._commit(["todo-actions.jsonl"], f"todos: apply {len(lines)}")
+            if any(x["state"] == "done" for x in lines.values()):
+                try:
+                    self.recollect_gtasks()
+                except Exception:  # noqa: BLE001
+                    log.exception("勾完后重采 gtasks 失败")
+            self.rebuild()
+            return lines
+
+    def post_todo(self, task_id, op, body):
+        """本机端点 POST /v1/todos/<id>/complete|undo：追加首行 → 立刻执行。body 可带 id（幂等键）/ title / from。"""
+        body = body or {}
+        frm = body.get("from", "claude")
+        if frm not in ledger.EDIT_FROM:
+            raise ValueError(f"from={frm} 不被允许（只接受 {sorted(ledger.EDIT_FROM)}）")
+        a = todo_actions.new_action(task_id, op, body.get("title"), frm, now_iso(), body.get("id"))
+        with self.svc:
+            with data_lock():
+                first, final, _ = todo_actions.summarize(todo_actions.read_records(TODO_ACTIONS))
+                if a["id"] in first and (first[a["id"]].get("task_id"), first[a["id"]].get("op")) != (task_id, op):
+                    raise ValueError(f"id {a['id']} 已用于别的任务 / 操作")
+                if a["id"] not in first:
+                    ledger.append(TODO_ACTIONS, a)
+                    self._commit(["todo-actions.jsonl"], f"todos: + {op} {a['id']}")
+            line = final.get(a["id"]) or self.process_todos().get(a["id"])
+        if not line:
+            return 202, {"action": {**a, "state": "pending"}}
+        out = {k: v for k, v in {**a, **line}.items() if k in ("id", "task_id", "op", "state", "result", "error")}
+        return (200 if line["state"] == "done" else 502), {"action": out}
+
     def sync_cycle(self):
         with self.svc:
             with data_lock():
@@ -163,6 +215,10 @@ class Service:
                 after = self._head()
             self.last_sync_down = now_iso()
             done = self.process_pending()
+            try:
+                done = self.process_todos() or done          # 网页 / iOS 经 GitHub 追加的勾完成；跟 sync 同频（≤ sync_down_secs）
+            except Exception:  # noqa: BLE001
+                log.exception("todo-actions 处理异常")
             if after != before and not done:
                 self.rebuild()
             if self.push and git("rev-list", "--count", f"origin/{BRANCH}..HEAD", check=False).stdout.strip() not in ("", "0"):
@@ -301,6 +357,7 @@ class Service:
     def health(self):
         # 不取 data_lock：账本只追加，读到半行 parse_lines 会跳过，最多少计一条
         pending = len(ledger.pending_edits(ledger.read_ledger(EDITS)))
+        pending_todos = len(todo_actions.summarize(todo_actions.read_records(TODO_ACTIONS), todo_actions.local_done())[2])
         try:
             import collect_dashboard as cd
             vault_ok = os.path.isdir(cd.VAULT_DASH)
@@ -312,7 +369,7 @@ class Service:
                 "last_sync_ok": self.last_sync_ok, "last_sync_error": self.last_sync_error,
                 "last_push": self.last_push, "last_push_ok": self.last_push_ok, "last_push_error": self.last_push_error,
                 "worktree_dirty": dirty, "rebasing": rebasing,
-                "pending_edits": pending, "vault_ok": vault_ok, "version": VERSION,
+                "pending_edits": pending, "pending_todos": pending_todos, "vault_ok": vault_ok, "version": VERSION,
                 "last_collect": self.sched.last_collect, "collect_failures": self.sched.collect_failures,
                 "push_failures": self.pusher.failures, "apns": self.notifier.health()}
 
@@ -393,6 +450,8 @@ def make_handler(svc):
                     return self._send(*svc.patch_reading(m.group(1), self._body()))
                 if method == "POST" and (m := re.fullmatch(r"/v1/notes/([^/]+)/done", path)):
                     return self._send(*svc.note_done(m.group(1), self._body()))
+                if method == "POST" and (m := re.fullmatch(r"/v1/todos/([^/]+)/(complete|undo)", path)):
+                    return self._send(*svc.post_todo(m.group(1), m.group(2), self._body()))
                 if method == "POST" and path == "/v1/push/test":
                     return self._send(*svc.push_test(self._body()))
                 if method == "POST" and path == "/v1/collect":
