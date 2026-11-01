@@ -21,12 +21,18 @@ const OVERDUE_AFTER = 14;   // 过期超过此天数的项目卡 / 折不自动�
 const EDITS_PATH = '/repos/charliezong18/review/contents/edits.jsonl';
 // 读物状态行（读完 / 不读了）走同一条路：追加到 home-data 的 readings.jsonl，同 id 后者生效；dibao 拉回后重算
 const READINGS_PATH = '/repos/charliezong18/review/contents/readings.jsonl';
+// 今日待办勾完成 / 撤销：同一条路追加到 home-data 的 todo-actions.jsonl；Mac mini 的 dibao 每分钟拉回，执行 gog tasks done|undo 后重采
+const TODO_ACTIONS_PATH = '/repos/charliezong18/review/contents/todo-actions.jsonl';
+const UNDO_MS = 6000;
 const DEMO = new URLSearchParams(location.search).has('demo');
 const TIER = { now: 'now', build: 'build', learn: 'learn', ice: 'ice' };
 const STATUS = { active: '推进中', waiting: '等别人', you: '卡在你', ice: '冷冻', done: '完成' };
 let lastData = null;
 const localReadings = {};   // id → done|dropped：已点过、home.json 还没反映的读物状态；render 时据此隐藏
 const localEdits = [];    // 已保存、home.json 还没反映的编辑；重新读取时叠回去，免得乐观更新被旧数据冲掉
+const localTodos = {};    // task_id → { ts }：已勾、todos 还没反映的待办；render 时显示为已完成（划线、灰）
+const todoQueue = {};     // task_id → Promise：同一任务的写入串行，撤销一定排在勾选之后
+const todoWritten = {};   // task_id → 最后一次写成功的 op（complete|undo）；勾选没写成功就没有可撤销的
 
 const $ = (id) => document.getElementById(id);
 const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; } };
@@ -424,7 +430,7 @@ function render(data) {
 
 // 今日待办（Google Tasks，home.json 的 todos）：今天到期 / 已过期 / 无截止日（默认折叠）。
 // 没有 todos 键（旧数据）→ 整块隐藏；error 非空 → 显示上次成功的数据 + 一行提示；某段缺失按空处理。
-// 只读展示：不提供完成 / 编辑按钮（任务在 Google Tasks 里办）。
+// 每行前一个勾选框：勾 = 完成、取消勾 / 点「撤销」= 撤销（todoToggle）；只此两种操作，不建、不删、不改标题。
 function renderTodos(data) {
   const t = data.todos;
   const wrap = $('todos-wrap');
@@ -432,11 +438,15 @@ function renderTodos(data) {
   if (!t || typeof t !== 'object') { wrap.hidden = true; return; }
   wrap.hidden = false;
   const list = (k) => (Array.isArray(t[k]) ? t[k].filter((x) => x && typeof x.title === 'string') : []);
+  // 本地已勾的：todos 里已经没有了（Mac mini 处理完重采）或采集已比勾选晚 5 分钟以上 → 以数据为准，丢掉本地标记
+  const ids = new Set(['today', 'overdue', 'nodate'].flatMap((k) => list(k).map((x) => x.id)));
+  const synced = new Date(t.synced_at || 0).getTime();
+  for (const [id, v] of Object.entries(localTodos)) if (!ids.has(id) || synced - new Date(v.ts).getTime() > 300000) delete localTodos[id];
   const counts = t.counts || {};
   const n = (k) => (Number.isFinite(+counts[k]) && counts[k] != null ? +counts[k] : list(k).length);
   const src = $('todos-src');
-  const synced = t.synced_at ? ago(t.synced_at) : '未同步';
-  src.textContent = t.error ? `停在 ${synced}` : synced;
+  const syncedAgo = t.synced_at ? ago(t.synced_at) : '未同步';
+  src.textContent = t.error ? `停在 ${syncedAgo}` : syncedAgo;
   src.title = t.error ? `Google Tasks 同步失败，显示的是上次成功的数据（${t.error}）` : `Google Tasks 同步于 ${t.synced_at || '未知'}`;
   src.setAttribute('aria-label', src.title);
   src.classList.toggle('stale', !!t.error || !t.synced_at);
@@ -449,7 +459,11 @@ function renderTodos(data) {
     $(`todos-${k}`).replaceChildren(...(items.length ? items.map((x) => {
       const dated = /^\d{4}-\d{2}-\d{2}$/.test(x.due || '');
       const days = dated ? daysUntil(x.due) : NaN;
-      return h('li', { class: cls, 'data-id': x.id || null },
+      const done = !!(x.id && localTodos[x.id]);
+      const ck = x.id ? h('input', { type: 'checkbox', class: 'tck', checked: done ? '' : null,
+        'aria-label': `${done ? '撤销完成' : '勾完成'}：${x.title}`, onclick: (e) => todoToggle(x, e.currentTarget.checked) }) : null;
+      return h('li', { class: `${cls}${ck ? ' ck' : ''}${done ? ' done' : ''}`.trim() || null, 'data-id': x.id || null },
+        ck,
         h('span', { class: 'd' }, dated ? md(x.due) : '—'),
         h('span', { class: 't' }, x.title, k === 'overdue' && Number.isFinite(days) && days < 0 ? h('span', { class: 'm' }, `已过 ${-days} 天`) : null));
     }) : [h('li', { class: 'empty' }, emptyText)]),
@@ -458,6 +472,57 @@ function renderTodos(data) {
   fill('today', '今天没有到期的待办。', 'soon');
   fill('overdue', '没有过期的待办。', 'over');
   fill('nodate', '没有无截止日的待办。', '');
+}
+
+// 勾选 / 撤销一条待办：先乐观改显示，再追加 todo-actions.jsonl 一行；写失败回滚并提示。
+// 文案不说「已同步」——要等 Mac mini 的 dibao 执行（≤1–2 分钟），之后下次刷新 todos 里自然消失。
+async function todoToggle(x, checked) {
+  const op = checked ? 'complete' : 'undo';
+  const ts = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+  if (checked) localTodos[x.id] = { ts }; else delete localTodos[x.id];
+  if (lastData) renderTodos(lastData);
+  if (checked) showUndo(x); else hideUndo();
+  try {
+    const wrote = await queueTodo(x, op, ts);
+    if (wrote) setStatus(DEMO ? `演示模式：已${checked ? '勾' : '撤销'}，不写入。` : `已${checked ? '勾' : '撤销'}，稍后同步到 Google Tasks。`);
+  } catch (e) {
+    if (checked) delete localTodos[x.id]; else localTodos[x.id] = { ts };
+    if (lastData) renderTodos(lastData);
+    hideUndo();
+    setStatus(`「${x.title}」没${checked ? '勾' : '撤销'}成：${e.message}`, true);
+  }
+}
+
+function queueTodo(x, op, ts) {
+  const run = async () => {
+    if (op === 'undo' && todoWritten[x.id] !== 'complete') return false;   // 勾选没写进去 → 没有可撤销的
+    const rec = { id: crypto.randomUUID(), ts, task_id: x.id, op, title: String(x.title || '').slice(0, 200), from: 'web', state: 'pending' };
+    if (!DEMO) {                                                            // 演示模式（虚构数据）绝不写真实仓
+      if (!getToken()) throw new Error('这台设备没有 token。');
+      await appendLine(TODO_ACTIONS_PATH, JSON.stringify(rec), `todos: ${op} ${rec.id}`);
+    }
+    todoWritten[x.id] = op;
+    return true;
+  };
+  const p = (todoQueue[x.id] || Promise.resolve()).catch(() => {}).then(run);
+  todoQueue[x.id] = p;
+  return p;
+}
+
+let undoTimer = null;
+function showUndo(x) {
+  let t = $('todo-toast');
+  if (!t) { t = h('div', { id: 'todo-toast', class: 'toast', role: 'status', 'aria-live': 'polite' }); document.body.append(t); }
+  t.replaceChildren(h('span', {}, `已勾「${x.title}」，稍后同步到 Google Tasks`),
+    h('button', { type: 'button', class: 'mini', onclick: () => todoToggle(x, false) }, '撤销'));
+  t.hidden = false;
+  clearTimeout(undoTimer);
+  undoTimer = setTimeout(hideUndo, UNDO_MS);
+}
+function hideUndo() {
+  clearTimeout(undoTimer);
+  const t = $('todo-toast');
+  if (t) t.hidden = true;
 }
 
 // 行内 markdown 最小渲染：**粗体** `code` [[wikilink]]→文本 裸 URL→链接。直接建 DOM 节点（textContent），天然不经 HTML 解析
