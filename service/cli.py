@@ -8,12 +8,15 @@
   cli.py note-done --id ID [--result 文本]
   cli.py collect [--sources menxia,dashboard]     立即触发一轮采集，返回 job id（GET /v1/collect/{job} 查）
   cli.py push-test [--title T] [--body B] [--url menxia://home]   手动发一条推送（APNs，无设备则 ntfy）；会真发，验收用
-输出响应 JSON；HTTP 非 2xx 退出码 1。连不上 / 超时输出 {"ok": false, "error": …}，退出码 1。
+  cli.py todo-done <task_id> [--title T]          把一条 Google Tasks 标完成（会真改 Google Tasks）
+  cli.py todo-undo <task_id> [--title T]          撤销完成（标回未完成）
+输出响应 JSON；HTTP 非 2xx 退出码 1（todo 执行失败 = HTTP 502）。连不上 / 超时输出 {"ok": false, "error": …}，退出码 1。
 """
 import argparse
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 TIMEOUT = 60
@@ -53,6 +56,10 @@ def main(argv=None):
     p.add_argument("--title", default="测试")
     p.add_argument("--body", default="门下推送")
     p.add_argument("--url", default="menxia://home")
+    for name in ("todo-done", "todo-undo"):
+        p = sub.add_parser(name)
+        p.add_argument("task_id")
+        p.add_argument("--title", default="")
     a = ap.parse_args(argv)
     if a.cmd == "health":
         code, out = call(a.port, "GET", "/health")
@@ -67,6 +74,10 @@ def main(argv=None):
     elif a.cmd == "collect":
         srcs = [s for s in a.sources.split(",") if s]
         code, out = call(a.port, "POST", "/v1/collect", {"sources": srcs} if srcs else {})
+    elif a.cmd in ("todo-done", "todo-undo"):
+        op = "complete" if a.cmd == "todo-done" else "undo"
+        tid = urllib.parse.quote(a.task_id, safe="")
+        code, out = call(a.port, "POST", f"/v1/todos/{tid}/{op}", {"title": a.title, "from": "claude"})
     else:
         code, out = call(a.port, "POST", f"/v1/notes/{a.id}/done", {"result": a.result})
     print(f"HTTP {code}" if code else "HTTP -（未连上 dibao）")

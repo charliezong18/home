@@ -123,6 +123,12 @@ dialog header .cid { margin-left: var(--s2); vertical-align: middle; }
 .todos .warn { color: var(--amber); }
 .todos summary.sub { display: list-item; cursor: pointer; }
 .todos summary.sub b { margin-left: var(--s2); }
+.todos li.ck { grid-template-columns: 18px 4.2em 1fr; }
+.todos .tck { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--jade); cursor: pointer; }
+.todos li.done .t, .todos li.done .d, .todos li.done .m { text-decoration: line-through; color: var(--text-3); }
+.toast { position: fixed; left: 50%; bottom: var(--s5); transform: translateX(-50%); z-index: 20; display: flex; align-items: center; gap: var(--s3);
+  max-width: calc(100vw - 2 * var(--s4)); padding: var(--s2) var(--s3); background: var(--surface); color: var(--text); border: 1px solid var(--line-strong); border-radius: 6px; font-size: var(--fs-13); box-shadow: 0 4px 16px rgb(0 0 0 / .25); }
+.toast[hidden] { display: none; }
 
 .foot { margin-top: var(--s4); padding-top: var(--s2); border-top: 3px double var(--line-strong); display: flex; justify-content: space-between; gap: var(--s4); font-size: var(--fs-12); color: var(--text-3); }
 .status { color: var(--text-2); }
