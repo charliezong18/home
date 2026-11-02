@@ -131,10 +131,41 @@ class ContentTest(unittest.TestCase):
         self.assertEqual(config.load(path + ".missing").digest, {})
 
     def test_money_detection(self):
-        for t in ("付 $45", "退款 1,200 元", "3万首付", "¥88", "年费 99 USD"):
+        for t in ("付 $45", "退款 1,200 元", "3万首付", "¥88", "年费 99 USD",
+                  "年费USD 300", "RMB 88 押金", "三千块", "两百元", "示例：付 1,200", "12,345,678"):   # F-15
             self.assertTrue(digest.has_money(t), t)
-        for t in ("示例：还书", "第 3 章", "2026 计划", "#12 改版"):
+        for t in ("示例：还书", "第 3 章", "2026 计划", "#12 改版", "v1.2 发布", "3 点开会"):
             self.assertFalse(digest.has_money(t), t)
+
+    def test_due_private_flag(self):
+        h = sample_home()
+        h["due"] = [{"id": "d:p", "title": "示例私事", "date": DAY, "private": True}]
+        h["projects"] = []
+        body = digest.build("morning", h, DAY)["body"]
+        self.assertNotIn("示例私事", body)
+        self.assertIn("今天到期 1：1 件私密事项", body)
+
+    def test_evening_new_fold_beyond_oldest_cap(self):
+        """F-08：一组 21 折，oldest 只留最旧 20，当天新到的那折靠 recent_open 仍算进「今天新到」。"""
+        h = sample_home()
+        group = [fold(200 + i, f"示例旧折{i}", created=f"2026-10-{i + 1:02d}T18:00:00Z") for i in range(20)]
+        new = fold(299, "示例今天新到", created="2026-11-02T18:00:00Z")
+        h["folders"]["oldest"] = {"你拍": group}                                   # 第 21 折被截掉
+        h["folders"]["recent_open"] = [new] + group[::-1]
+        self.assertIn("今天新到 1 折：示例今天新到", digest.build("evening", h, DAY)["body"])
+        del h["folders"]["recent_open"]                                          # 旧版 home.json 兜底：漏掉（原行为）
+        self.assertNotIn("今天新到", digest.build("evening", h, DAY)["body"])
+
+    def test_stale_reason(self):
+        now = utc("2026-11-02T16:00:00")
+        self.assertEqual(digest.stale_reason({}, now), "home.json 缺失")
+        self.assertIn("小时未更新", digest.stale_reason({"generated": "2026-11-02T10:00:00Z"}, now))
+        self.assertIsNone(digest.stale_reason({"generated": "2026-11-02T15:00:00Z"}, now))
+        bad = {"generated": "2026-11-02T15:00:00Z", "sources": {"menxia": {"consecutive_failures": 3}}}
+        self.assertIn("menxia", digest.stale_reason(bad, now))
+        d = digest.build("morning", {}, DAY, stale="home.json 缺失")
+        self.assertEqual(d["body"], "邸报数据过期，早报暂缺（home.json 缺失）")
+        self.assertFalse(d["empty"])
 
     def test_empty_day_is_one_line(self):
         for kind, line in (("morning", "今天没有到期和待拍"), ("evening", "今天没有新进展，明天暂无安排")):
@@ -196,8 +227,8 @@ class ServiceDigestTest(unittest.TestCase):
         os.environ["DIBAO_STATE_DIR"] = os.path.join(tmp, "state")
         dibao.HOME_JSON = os.path.join(tmp, "home.json")
         dibao.TODO_ACTIONS = os.path.join(tmp, "todo-actions.jsonl")
-        with open(dibao.HOME_JSON, "w") as f:
-            json.dump(sample_home(), f, ensure_ascii=False)
+        with open(dibao.HOME_JSON, "w") as f:      # generated 晚于各用例的 now：数据算新鲜（F-10 检查不介入）
+            json.dump({**sample_home(), "generated": "2026-11-03T15:30:00Z"}, f, ensure_ascii=False)
         self.devices = os.path.join(tmp, "devices.jsonl")
         with open(self.devices, "w") as f:
             f.write(json.dumps({"token": "fake-token-1", "env": "sandbox"}) + "\n")
@@ -249,6 +280,19 @@ class ServiceDigestTest(unittest.TestCase):
         self.assertEqual(self.svc.digest_tick(utc("2026-11-02T16:00:00")), {"morning": "ntfy"})
         self.assertEqual(self.ntfy[0][1], "menxia://home")
         self.assertTrue(self.ntfy[0][0].startswith("早报 · 11/2 周一："))
+
+    def test_missing_or_stale_home_is_not_an_empty_day(self):
+        """F-10：home.json 为空 / 6 小时前生成 → 不发 EMPTY 文案，改发「数据过期」。"""
+        for home, why in (({}, "缺失"), ({"generated": "2026-11-02T10:00:00Z"}, "6 小时未更新")):
+            with open(dibao.HOME_JSON, "w") as f:
+                json.dump(home, f)
+            for kind in ("morning", "evening"):
+                d = self.svc.build_digest(kind, utc("2026-11-02T16:00:00"))
+                self.assertNotIn(d["body"], digest.EMPTY.values())
+                self.assertTrue(d["body"].startswith("邸报数据过期"), d["body"])
+                self.assertIn(why, d["body"])
+        self.assertEqual(self.svc.digest_tick(utc("2026-11-02T16:00:00")), {"morning": "apns"})
+        self.assertIn("早报暂缺", self.fake.sent[0][0]["aps"]["alert"]["body"])
 
     def test_post_digest_dry_run_does_not_send(self):
         code, out = self.svc.post_digest("morning", {"dry_run": True})

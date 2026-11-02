@@ -18,7 +18,14 @@ TITLE_MAX = 24
 DEFAULT_QIAN = frozenset({"身份", "健康", "钱"})     # 通用缺省；其余受保护 label 只在本机 config.toml [digest] 里设
 PROTECTED_QIAN = set(DEFAULT_QIAN)
 PROTECTED_PROJ = set()
-MONEY_RE = re.compile(r"[$¥￥€£]\s?\d|\d[\d,.]*\s?(?:元|块|美元|美金|刀|万|[kK]\b|USD|usd|RMB|rmb)")
+MONEY_RE = re.compile(r"[$¥￥€£]\s?\d|\d[\d,.]*\s?(?:元|块|美元|美金|刀|万|[kK]\b|USD|usd|RMB|rmb)"
+                      r"|(?<![A-Za-z])(?:USD|RMB|CNY|HKD|EUR|usd|rmb|cny|hkd|eur)\s?\d"     # 货币在前：USD 300
+                      r"|[零一二两三四五六七八九十百千万亿]+\s?(?:块|元|美元|美金|刀)"   # 中文数字：三千块
+                      r"|\d{1,3}(?:,\d{3})+(?!\d)")                                 # 无单位千分位：1,200
+STALE_H = 3                      # home.json 生成时间超过这么久 = 数据过期，早晚报不下「空日」结论
+CORE_SOURCES = ("menxia", "dashboard")
+STALE_FAILS = 3
+STALE = {"morning": "邸报数据过期，早报暂缺（{why}）", "evening": "邸报数据过期，晚报暂缺（{why}）"}
 # App（menxia-ios HomeLink）目前只认 menxia://home（邸报）/ ?id= / ?pr=，没有跳「待审」tab 的深链；晚报暂时也跳邸报。
 URLS = {"morning": "menxia://home", "evening": "menxia://home"}
 TITLES = {"morning": "早报", "evening": "晚报"}
@@ -76,6 +83,27 @@ def fold_private(f):
     return bool(qian & PROTECTED_QIAN or proj & PROTECTED_PROJ or has_money(f.get("title")))
 
 
+def item_private(it):
+    """due[] / projects[] 条目：显式 private: true（life.jsonl 可带）或标题含金额。事件推送与早晚报共用。"""
+    return bool(it.get("private") is True or has_money(it.get("title")))
+
+
+def stale_reason(home, now=None):
+    """home.json 缺失 / 过旧 / 主要源连续失败 → 原因文本（锁屏可见，不含标题）；数据可信返回 None。"""
+    if not home:
+        return "home.json 缺失"
+    try:
+        gen = dt.datetime.fromisoformat(str(home.get("generated")).replace("Z", "+00:00"))
+    except ValueError:
+        return "home.json 无生成时间"
+    age = (now_la(now) - gen).total_seconds() / 3600
+    if age > STALE_H:
+        return f"{int(age)} 小时未更新"
+    bad = [s for s in CORE_SOURCES if int(((home.get("sources") or {}).get(s) or {}).get("consecutive_failures") or 0)
+           >= STALE_FAILS]
+    return f"{'、'.join(bad)} 采集连续失败" if bad else None
+
+
 def short(s):
     s = (s or "").strip() or "（无标题）"
     return s if len(s) <= TITLE_MAX else s[:TITLE_MAX] + "…"
@@ -117,11 +145,11 @@ def dated_items(home):
     out = []
     for d in home.get("due") or []:
         if d.get("date"):
-            out.append({"id": d.get("id"), "title": d.get("title", ""), "date": d["date"], "private": has_money(d.get("title"))})
+            out.append({"id": d.get("id"), "title": d.get("title", ""), "date": d["date"], "private": item_private(d)})
     for p in home.get("projects") or []:
         if p.get("deadline"):
             out.append({"id": p.get("id"), "title": p.get("title", ""), "date": str(p["deadline"])[:10],
-                        "private": has_money(p.get("title"))})
+                        "private": item_private(p)})
     for f in folds(home):
         if f.get("deadline"):
             out.append({"id": f"#{f['n']}", "title": f.get("title", ""), "date": f["deadline"], "private": f["private"]})
@@ -194,7 +222,12 @@ def evening(home, day, done_todos=0):
     tomorrow = (dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat()
     merged = [{**f, "private": fold_private(f)} for f in (home.get("folders") or {}).get("merged_recent") or []
               if la_date(f.get("merged_at")) == day]
-    new = [f for f in folds(home) if la_date(f.get("created")) == day]
+    fo = home.get("folders") or {}
+    if "recent_open" in fo:                       # 每组最新 20 折（oldest 只有最旧 20，组大时会漏掉今天新到的）
+        recent = [{**f, "private": fold_private(f)} for f in fo.get("recent_open") or []]
+    else:                                         # 旧版 home.json 兜底
+        recent = folds(home)
+    new = [f for f in recent if la_date(f.get("created")) == day]
     lines = []
     prog = []
     if merged:
@@ -214,10 +247,14 @@ def evening(home, day, done_todos=0):
     return lines
 
 
-def build(kind, home, day, done_todos=0):
-    """→ {key, title, body, url, empty, lines}。没内容只发一行 EMPTY。"""
+def build(kind, home, day, done_todos=0, stale=None):
+    """→ {key, title, body, url, empty, stale, lines}。没内容只发一行 EMPTY；stale（stale_reason 的结果）非空时
+    只发一行「数据过期」，不下「空日」结论。"""
     home = home or {}
-    lines = morning(home, day) if kind == "morning" else evening(home, day, done_todos)
+    if stale:
+        lines, body = [], STALE[kind].format(why=stale)
+    else:
+        lines = morning(home, day) if kind == "morning" else evening(home, day, done_todos)
+        body = "\n".join(lines) if lines else EMPTY[kind]
     return {"kind": kind, "day": day, "key": key(kind, day), "title": header(kind, day),
-            "body": "\n".join(lines) if lines else EMPTY[kind], "url": URLS[kind],
-            "empty": not lines, "lines": lines}
+            "body": body, "url": URLS[kind], "empty": not lines and not stale, "stale": stale, "lines": lines}

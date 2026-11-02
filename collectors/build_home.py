@@ -10,12 +10,13 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 
 import collect_gtasks
 from collect_countdown import next_date
 from life_ingest import load_life
 from common import (CACHE_DIR, DATA_DIR, SOURCES, commit_and_push, data_lock, git, log, now_iso,
-                    read_json, snapshot_path, sync_down, write_json)
+                    read_json, redact_email, snapshot_path, sync_down, write_json)
 
 SCHEMA = 1
 HEARTBEAT_H = 3
@@ -83,8 +84,72 @@ def due_items(snaps, life=None, today=None):
     latest = {}
     for it in items:
         latest[it["id"]] = {**latest.get(it["id"], {}), **it}
-    kept = [it for it in latest.values() if not it.get("date") or lo.isoformat() <= it["date"] <= hi.isoformat()]
+    # 同一日历事件改过标题会以新 id 再写一条（F-04）：calendar 条目按 (date, note, 规整标题) 归并，保留后写的那条
+    cal, merged = {}, []
+    for it in latest.values():
+        if it.get("source") != "calendar":
+            merged.append(it)
+            continue
+        k = (it.get("date", ""), (it.get("note") or "").strip(), norm_title(it.get("title")))
+        if k in cal:
+            merged[cal[k]] = it
+        else:
+            cal[k] = len(merged)
+            merged.append(it)
+    kept = [it for it in merged if not it.get("date") or lo.isoformat() <= it["date"] <= hi.isoformat()]
     return sorted(kept, key=lambda it: (not it.get("date"), it.get("date", "")))
+
+
+def norm_title(s):
+    """归并用：全角→半角（NFKC）、去括注、去 emoji / 标点 / 空白、小写。"""
+    s = unicodedata.normalize("NFKC", str(s or ""))
+    s = re.sub(r"\([^)]*\)|\[[^\]]*\]|【[^】]*】", "", s)
+    return re.sub(r"[\W_]+", "", s).lower()
+
+
+FAILED_HOURS = 24
+FAILED_ERR_MAX = 80
+
+
+def failed_todos(records, now=None):
+    """todo-actions.jsonl 记录 → 最近 FAILED_HOURS 小时内、且该任务之后没有成功操作的失败 [{task_id, error}]。
+    error 截短 + 邮箱脱敏；不带标题（首行的 title 不出这个函数）。供客户端显示「没同步成功，再勾一次」。"""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    first, last = {}, {}
+    for r in records:
+        if not isinstance(r, dict) or not r.get("id"):
+            continue
+        if r.get("op"):
+            first.setdefault(r["id"], r)
+        elif r.get("state") in ("done", "failed") and r["id"] in first:
+            tid = first[r["id"]].get("task_id")
+            if tid and str(r.get("ts", "")) >= str((last.get(tid) or {}).get("ts", "")):
+                last[tid] = r                               # 每个任务只看最后一次终态
+    out = []
+    for tid, r in last.items():
+        if r.get("state") != "failed":
+            continue
+        try:
+            ts = dt.datetime.fromisoformat(str(r.get("ts")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if now - ts <= dt.timedelta(hours=FAILED_HOURS):
+            out.append({"task_id": tid, "error": redact_email(str(r.get("error") or "失败"))[:FAILED_ERR_MAX]})
+    return out
+
+
+def load_todo_actions():
+    out = []
+    try:
+        with open(os.path.join(DATA_DIR, "todo-actions.jsonl"), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return out
 
 
 def edit_counts():
@@ -178,6 +243,7 @@ def main():
             "generated": now_iso(),
             "sources": sources,
             "folders": {"total": m.get("total", 0), "counts": m.get("counts", {}), "oldest": m.get("oldest", {}),
+                        **({"recent_open": m["recent_open"]} if "recent_open" in m else {}),
                         **({"merged_recent": m["recent_closed"]} if "recent_closed" in m else {})},
             "library": m.get("library", []),
             "projects": d.get("cards", []),
@@ -187,6 +253,7 @@ def main():
         # Google Tasks「今日待办」：独立于 due[]；从没采过就不写这个键（客户端据此不显示该栏）
         todos = collect_gtasks.from_snapshot(snaps.get("gtasks"), status.get("gtasks"), collect_gtasks.la_today())
         if todos is not None:
+            todos["failed"] = failed_todos(load_todo_actions())   # 最近 24 h 勾完成没成功的（不含标题）
             home["todos"] = todos
         changed = old_home is None or normalized(home, status) != normalized(old_home, old_status)
         stale = True

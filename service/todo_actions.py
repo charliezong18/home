@@ -8,7 +8,8 @@ dibao 处理后追加状态行 {"id","state":"done"|"failed","ts","result"|"erro
 只允许 complete / undo：不建、不删、不改标题、不动 notes。
 幂等：同 id 只执行一次——文件里出现过 done/failed 行（终态粘住，客户端重发同 id 的 pending 行也不重放），
 或本机账本 todo-actions-done.jsonl（DIBAO_STATE_DIR）记过，都算已处理。
-gog 失败 → 先只读 `gog tasks get` 看任务是否已是目标状态（是则算成功），否则行标 failed 并保留原因，不自动重试。
+gog 失败 → 先只读 `gog tasks get` 看任务是否已是目标状态（是则算成功）；瞬时错误（超时 / 起不来 / 5xx）
+指数退避重试 RETRIES 次（期间不写状态行 = 仍是 pending，幂等键不变），仍失败才标 failed 并保留原因。
 gog 调用经可注入的 runner（缺省 subprocess.run），测试全部用假 gog。
 """
 import json
@@ -16,19 +17,26 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "collectors"))
 
 from collect_gtasks import GOG, LIST_ID  # noqa: E402
+from common import redact_email  # noqa: E402
 import ledger  # noqa: E402
 
 OPS = {"complete": "done", "undo": "undo"}                 # op → gog 子命令（只此两种）
 TARGET_STATUS = {"complete": "completed", "undo": "needsAction"}
 TERMINAL = {"done", "failed"}
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,199}$")   # 不以 - 开头，免得被 gog 当成参数
+ACTION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")    # 幂等键：uuid 或 ≤64 个安全字符（进 jsonl 与 commit message）
 CALL_TIMEOUT = 30
 TITLE_MAX = 200
+RETRIES = 3                                                 # 瞬时错误再试 3 次
+BACKOFF = 2                                                 # 2 s、4 s、8 s
+TRANSIENT_RE = re.compile(r"\b5\d\d\b|backend ?error|internal ?error|unavailable|timed? ?out|超时|起不来"
+                          r"|connection (?:reset|refused)|temporar", re.I)
 
 
 def state_path():
@@ -48,6 +56,8 @@ def validate(a):
 def new_action(task_id, op, title, frm, ts, aid=None):
     """本机端点用：生成首行；不合法抛 ValueError。"""
     import uuid
+    if aid is not None and not ACTION_ID_RE.match(str(aid)):
+        raise ValueError(f"id 不合法（应为 uuid 或 ≤64 个字母数字 _ -）：{str(aid)[:40]!r}")
     a = {"id": str(aid or uuid.uuid4()), "ts": ts, "task_id": task_id, "op": op,
          "title": str(title or "")[:TITLE_MAX], "from": frm, "state": "pending"}
     err = validate(a)
@@ -87,7 +97,7 @@ def _gog(runner, args, timeout=CALL_TIMEOUT):
         return None, "", f"gog 超时 {timeout}s"
     except OSError as e:
         return None, "", f"gog 起不来：{e}"
-    return r.returncode, r.stdout or "", (r.stderr or "").strip()[:200]
+    return r.returncode, r.stdout or "", redact_email((r.stderr or "").strip())[:200]
 
 
 def current_status(task_id, runner=subprocess.run, list_id=LIST_ID):
@@ -104,18 +114,28 @@ def current_status(task_id, runner=subprocess.run, list_id=LIST_ID):
     return obj.get("status") if isinstance(obj, dict) else None
 
 
-def execute(a, runner=subprocess.run, list_id=LIST_ID):
-    """执行一条首行 → (state, 结果或错误)。不重试。"""
+def transient(rc, msg):
+    """超时 / 起不来（rc=None）或 5xx 类错误 → 值得重试。"""
+    return rc is None or bool(TRANSIENT_RE.search(msg or ""))
+
+
+def execute(a, runner=subprocess.run, list_id=LIST_ID, sleep=time.sleep, retries=RETRIES):
+    """执行一条首行 → (state, 结果或错误)。瞬时错误指数退避重试 retries 次。"""
     err = validate(a)
     if err:
         return "failed", err
     op, tid = a["op"], a["task_id"]
-    rc, _, msg = _gog(runner, [OPS[op], list_id, tid])
-    if rc == 0:
-        return "done", "ok"
-    if current_status(tid, runner, list_id) == TARGET_STATUS[op]:
-        return "done", "already"                           # 已是目标状态 = 成功
-    return "failed", (f"gog {OPS[op]} rc={rc}: {msg}" if rc is not None else msg)[:200] or f"gog {OPS[op]} 失败"
+    for attempt in range(retries + 1):
+        rc, _, msg = _gog(runner, [OPS[op], list_id, tid])
+        if rc == 0:
+            return "done", "ok"
+        if current_status(tid, runner, list_id) == TARGET_STATUS[op]:
+            return "done", "already"                       # 已是目标状态 = 成功
+        if attempt == retries or not transient(rc, msg):
+            break
+        sleep(BACKOFF * 2 ** attempt)
+    detail = (f"gog {OPS[op]} rc={rc}: {msg}" if rc is not None else msg)[:200] or f"gog {OPS[op]} 失败"
+    return "failed", detail + (f"（已重试 {attempt} 次）" if attempt else "")
 
 
 def state_line(aid, state, detail, ts):
