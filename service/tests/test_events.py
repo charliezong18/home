@@ -99,6 +99,41 @@ class EventsTest(unittest.TestCase):
         self.assertEqual(self.fake.sent[0][1]["aps"]["alert"]["body"], "今天截止：甲")
         self.assertEqual(n.scan_due(home, "2026-10-29"), ["apns"])             # 次日换键
 
+    def test_private_items_never_show_title_in_event_push(self):
+        """F-03：带受保护 签: 的折 / 金额 / private: true → 锁屏正文不出标题、金额、折号。"""
+        n = self.notifier()
+        n.scan_home(self.home())                                                # 基线
+        home = {"folders": {"oldest": {"你拍": [
+            {"n": 31, "title": "示例体检复查", "qian": ["健康"]},
+            {"n": 32, "title": "示例报销 $120", "qian": []},
+            {"n": 33, "title": "示例公开折", "qian": []}]}}}
+        self.assertEqual(n.scan_home(home), ["apns", "apns", "apns"])
+        bodies = [p["aps"]["alert"]["body"] for _, p, _ in self.fake.sent]
+        self.assertEqual(bodies, ["1 件私密事项", "1 件私密事项", "#33 示例公开折"])
+        due = {"due": [{"id": "d:m", "title": "示例：交水费 $120", "date": "2026-10-28"},
+                       {"id": "d:p", "title": "示例私事", "date": "2026-10-28", "private": True},
+                       {"id": "d:o", "title": "示例：还书", "date": "2026-10-28"}],
+               "projects": [{"id": "p:m", "title": "示例项目 USD 300", "deadline": "2026-10-28"}]}
+        self.assertEqual(n.scan_due(due, "2026-10-28"), ["apns"] * 4)
+        self.assertEqual(n.note_done("e-m", "示例卡 ¥300", "p:m"), "apns")
+        all_text = json.dumps([p for _, p, _ in self.fake.sent], ensure_ascii=False)
+        for secret in ("体检", "$120", "报销", "示例私事", "交水费", "USD 300", "¥300", "#31", "#32"):
+            self.assertNotIn(secret, all_text, secret)
+        self.assertIn("今天截止：示例：还书", all_text)
+        self.assertIn("今天截止：1 件私密事项", all_text)
+        self.assertIn("附言已处理：1 件私密事项", all_text)
+
+    def test_duplicate_calendar_titles_push_due_once(self):
+        """F-04：同一日历事件三种标题写法 → build 侧归并成 1 条 → 当天只推 1 条。"""
+        import build_home
+        life = [{"id": f"d:cal-{i}", "title": t, "date": "2026-10-28", "note": "09:40", "source": "calendar"}
+                for i, t in enumerate(("示例：体检+预约（线上）", "示例：体检+预约", "⏰ 示例：体检＋预约"))]
+        import datetime as dt
+        home = {"due": build_home.due_items({}, life, dt.date(2026, 10, 28))}
+        n = self.notifier()
+        self.assertEqual(n.scan_due(home, "2026-10-28"), ["apns"])
+        self.assertEqual(self.fake.sent[0][2], "due-d:cal-2-2026-10-28")       # 保留后写的那条 id
+
     def test_ntfy_fallback_when_no_active_device(self):
         n = self.notifier()
         self.write_devices()

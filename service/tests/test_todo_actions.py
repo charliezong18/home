@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import unittest
 import uuid
 
@@ -21,8 +22,10 @@ from test_http import req  # noqa: E402
 class FakeGog:
     """假 gog：记录每次调用；done/undo 按 fail 集合决定 rc；get 返回 status 表里的状态。"""
 
-    def __init__(self, fail=(), status=None, timeout=()):
+    def __init__(self, fail=(), status=None, timeout=(), flaky=None, stderr="googleapi: Error 503: backend error",
+                 delay=0):
         self.calls, self.fail, self.status, self.timeout = [], set(fail), dict(status or {}), set(timeout)
+        self.flaky, self.stderr, self.delay = dict(flaky or {}), stderr, delay   # flaky: tid → 先失败几次
 
     def __call__(self, cmd, **kw):
         self.calls.append(cmd)
@@ -36,8 +39,13 @@ class FakeGog:
             if st is None:
                 return subprocess.CompletedProcess(cmd, 1, "", "not found")
             return subprocess.CompletedProcess(cmd, 0, json.dumps({"task": {"id": tid, "status": st}}), "")
-        if tid in self.fail:
+        if self.delay:
+            time.sleep(self.delay)
+        if self.flaky.get(tid):
+            self.flaky[tid] -= 1
             return subprocess.CompletedProcess(cmd, 1, "", "googleapi: Error 503: backend error")
+        if tid in self.fail:
+            return subprocess.CompletedProcess(cmd, 1, "", self.stderr)
         self.status[tid] = "completed" if sub == "done" else "needsAction"
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -86,16 +94,49 @@ class PureTest(unittest.TestCase):
         g = FakeGog(fail={"T2"}, status={"T2": "needsAction"})
         self.assertEqual(ta.execute(action("T2", "undo"), g), ("done", "already"))
 
-    def test_gog_failure_clear_error_no_retry(self):
-        g = FakeGog(fail={"T1"}, status={"T1": "needsAction"})
-        state, err = ta.execute(action("T1"), g)
+    def test_gog_transient_failure_retries_with_backoff_then_fails(self):
+        """F-09：5xx / 超时退避重试 3 次仍失败才 failed。"""
+        g, sleeps = FakeGog(fail={"T1"}, status={"T1": "needsAction"}), []
+        state, err = ta.execute(action("T1"), g, sleep=sleeps.append)
         self.assertEqual(state, "failed")
         self.assertIn("gog done rc=1", err)
         self.assertIn("503", err)
-        self.assertEqual([c[2] for c in g.calls], ["done", "get"])     # 一次执行 + 一次只读核对，不重试
-        state, err = ta.execute(action("T9"), FakeGog(timeout={"T9"}))
+        self.assertIn("已重试 3 次", err)
+        self.assertEqual([c[2] for c in g.calls], ["done", "get"] * 4)   # 1 次 + 3 次重试，每次后只读核对
+        self.assertEqual(sleeps, [2, 4, 8])
+        sleeps.clear()
+        state, err = ta.execute(action("T9"), FakeGog(timeout={"T9"}), sleep=sleeps.append)
         self.assertEqual(state, "failed")
         self.assertIn("超时", err)
+        self.assertEqual(len(sleeps), 3)
+
+    def test_gog_503_then_success_is_done(self):
+        g, sleeps = FakeGog(flaky={"T1": 1}, status={"T1": "needsAction"}), []
+        self.assertEqual(ta.execute(action("T1"), g, sleep=sleeps.append), ("done", "ok"))
+        self.assertEqual(g.mutations(), [("done", "T1"), ("done", "T1")])
+        self.assertEqual(sleeps, [2])
+
+    def test_non_transient_failure_not_retried(self):
+        g, sleeps = FakeGog(fail={"T1"}, status={"T1": "needsAction"}, stderr="googleapi: Error 404: notFound"), []
+        self.assertEqual(ta.execute(action("T1"), g, sleep=sleeps.append)[0], "failed")
+        self.assertEqual(len(g.mutations()), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_gog_stderr_email_redacted(self):
+        """F-20：gog 错误原文里的邮箱不进 todo-actions.jsonl。"""
+        g = FakeGog(fail={"T1"}, status={"T1": "needsAction"}, stderr="auth failed for someone.demo@example.com")
+        state, err = ta.execute(action("T1"), g, sleep=lambda s: None)
+        self.assertEqual(state, "failed")
+        self.assertNotIn("someone.demo@example.com", err)
+        self.assertIn("<email>", err)
+
+    def test_action_id_shape(self):
+        """F-18：本机端点的幂等键只收 uuid 或 ≤64 个安全字符。"""
+        self.assertEqual(ta.new_action("T1", "complete", "", "claude", "t", "h-1")["id"], "h-1")
+        self.assertEqual(len(ta.new_action("T1", "complete", "", "claude", "t")["id"]), 36)
+        for bad in ("../x", "a b", "-x", "x" * 65, "a\nb", "名字"):
+            with self.assertRaises(ValueError, msg=bad):
+                ta.new_action("T1", "complete", "", "claude", "t", bad)
 
     def test_invalid_op_never_reaches_gog(self):
         g = FakeGog()
@@ -109,6 +150,7 @@ def _svc(gog):
     svc = dibao.Service(cfg, push=False)
     svc.prepare_repo()
     svc.todo_runner = gog
+    svc.todo_sleep = lambda s: None                                  # 退避不真睡
     svc.recollects = 0
 
     def recollect():
@@ -141,7 +183,7 @@ class ServiceTest(unittest.TestCase):
                          {"s1": "done", "s2": "done", "s3": "failed", "s4": "failed"})
         self.assertIn("不被允许", lines["s3"]["error"])
         self.assertIn("rc=1", lines["s4"]["error"])
-        self.assertEqual(g.mutations(), [("done", "T1"), ("undo", "T2"), ("done", "T4")])
+        self.assertEqual(g.mutations(), [("done", "T1"), ("undo", "T2")] + [("done", "T4")] * 4)   # T4 503：重试 3 次
         self.assertEqual(svc.recollects, 1)                          # 有成功的 → 立刻重采一次
         f = states()
         self.assertEqual((f["s1"]["state"], f["s4"]["state"]), ("done", "failed"))
@@ -150,7 +192,7 @@ class ServiceTest(unittest.TestCase):
         # 再跑 / 客户端重发同 id → 不重放；失败的也不自动重试
         write_remote_lines(dict(a1), dict(a4))
         self.assertEqual(svc.process_todos(), {})
-        self.assertEqual(len(g.mutations()), 3)
+        self.assertEqual(len(g.mutations()), 6)
         self.assertEqual(svc.health()["pending_todos"], 0)
 
     def test_sync_cycle_consumes_remote_lines(self):
@@ -166,6 +208,29 @@ class ServiceTest(unittest.TestCase):
             dibao.sync_down = orig
         self.assertEqual(states()["sync1"]["state"], "done")
         self.assertEqual(g.mutations(), [("done", "T5")])
+
+    def test_slow_gog_does_not_hold_service_lock(self):
+        """F-09：gog 慢（这里 1.5 s）时不占 self.svc；并发 POST /v1/todos 立刻 202，不排队等 gog。"""
+        g = FakeGog(delay=1.5)
+        svc = _svc(g)
+        write_remote_lines(action("T7", aid="slow1"))
+        t = threading.Thread(target=svc.process_todos)
+        t.start()
+        try:
+            for _ in range(100):                                     # 等它进入执行阶段
+                if g.calls:
+                    break
+                time.sleep(0.01)
+            t0 = time.monotonic()
+            self.assertTrue(svc.svc.acquire(timeout=0.5))            # 服务锁空闲
+            svc.svc.release()
+            code, out = svc.post_todo("T8", "complete", {"id": "slow2"})
+            self.assertLess(time.monotonic() - t0, 1.0)
+            self.assertEqual((code, out["action"]["state"]), (202, "pending"))
+        finally:
+            t.join()
+        self.assertEqual(states()["slow1"]["state"], "done")
+        self.assertEqual(svc.process_todos()["slow2"]["state"], "done")   # 下一轮接手
 
     def test_complete_then_undo_in_order(self):
         g = FakeGog()
@@ -211,6 +276,8 @@ class HttpTodoTest(unittest.TestCase):
         for path in ("/v1/todos/H2/delete", "/v1/todos/H2/update", "/v1/todos/H2"):
             self.assertEqual(req(self.port, "POST", path, {})[0], 404, path)
         self.assertEqual(req(self.port, "POST", "/v1/todos/-rf/complete", {})[0], 400)
+        for bad in ("../x", "x" * 65, "a b"):                         # F-18：幂等键格式
+            self.assertEqual(req(self.port, "POST", "/v1/todos/H2/complete", {"id": bad})[0], 400, bad)
         self.assertEqual(req(self.port, "POST", "/v1/todos/H2/complete", {"from": "web"})[0], 400)
         code, _, _ = req(self.port, "POST", "/v1/todos/H2/complete", {}, headers={"Host": "evil.example.com"})
         self.assertEqual(code, 421)                                   # 鉴权同 /v1/edits：只服务 127.0.0.1

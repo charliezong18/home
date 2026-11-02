@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """life.jsonl 账本写入口（Claude cron 会话唯一允许的写法）。
 
-  life_ingest.py add --json '<对象或数组>' [--no-git]
+  life_ingest.py add --json '<对象或数组>' [--event-id <日历事件 id>] [--no-git]
   life_ingest.py done --id d:cal-xxxx [--no-git]
   life_ingest.py list [--window 14]
 
 账本 append-only，同 id 后者生效。不存金额、邮件正文、发件人邮箱：title/note 里出现金额或 @ 直接拒绝（整批不写）。
+日历条目应带 `event_id`（日历事件的稳定 id / iCal UID）：有它就按 source+event_id 生成 id，事件改标题只更新同一条；
+没有才退回按 source+title+date 哈希（改一次标题就多一条，见 README）。event_id 只用来算 id，不写进账本。
+`private: true`：锁屏推送 / 早晚报只显示「1 件私密事项」。
 """
 import argparse
 import datetime as dt
@@ -18,7 +21,7 @@ from common import DATA_DIR, commit_and_push, data_lock, die, now_iso, sync_down
 
 ID_RE = re.compile(r"^d:(cal|bill|parcel)-[A-Za-z0-9_-]+$")
 SOURCES_OK = ("calendar", "gmail")
-FIELDS = ("title", "date", "note", "source", "status")
+FIELDS = ("title", "date", "note", "source", "status", "private")
 MONEY_RE = re.compile(r"[$¥￥€£]\s*\d|\d\s*(?:美元|元|USD|CNY|RMB)", re.I)
 TITLE_MAX = 60
 NOTE_MAX = 120
@@ -54,18 +57,23 @@ def merged(rows=None):
 def load_life():
     """给 build_home 用：归并后 status==open 的条目 + 账本最后一行 ts（无账本为 None）。"""
     rows = read_rows()
+    live = [e for e in merged(rows).values() if e.get("status", "open") == "open"]
+    live.sort(key=lambda e: str(e.get("ts", "")))          # 按最后写入时间：build 侧归并重复日历条目时保留后写的
     items = [{k: e[k] for k in ("id", "title", "date", "note", "source") if k in e}
-             for e in merged(rows).values() if e.get("status", "open") == "open"]
+             | ({"private": True} if e.get("private") is True else {}) for e in live]
     return items, (rows[-1].get("ts") if rows else None)
 
 
 def auto_id(e):
-    """缺 id 时按 source+title+date 生成稳定 id（worker 无法自己算哈希）。"""
+    """缺 id 时生成稳定 id（worker 无法自己算哈希）：有 event_id 用 source+event_id，否则 source+title+date。"""
     import hashlib
     pre = {"calendar": "cal"}.get(e.get("source"), "")
     if not pre and e.get("source") == "gmail":
         pre = "bill" if "账单" in str(e.get("title", "")) else "parcel"
-    h = hashlib.sha1(f"{e.get('source')}|{e.get('title')}|{e.get('date')}".encode()).hexdigest()[:8]
+    if str(e.get("event_id") or "").strip():
+        h = hashlib.sha1(f"{e.get('source')}|event|{str(e['event_id']).strip()}".encode()).hexdigest()[:12]
+    else:
+        h = hashlib.sha1(f"{e.get('source')}|{e.get('title')}|{e.get('date')}".encode()).hexdigest()[:8]
     return f"d:{pre}-{h}"
 
 
@@ -96,7 +104,10 @@ def validate(e):
     status = e.get("status", "open")
     if status not in ("open", "done"):
         raise ValueError(f"status 须为 open|done：{e['id']}")
-    return {"id": e["id"], "title": title, "date": e["date"], "note": note, "source": e["source"], "status": status}
+    if e.get("private") not in (None, True, False):
+        raise ValueError(f"private 须为 true|false：{e['id']}")
+    return {"id": e["id"], "title": title, "date": e["date"], "note": note, "source": e["source"], "status": status,
+            **({"private": e["private"]} if isinstance(e.get("private"), bool) else {})}
 
 
 def append(entries, no_git, msg):
@@ -133,6 +144,10 @@ def append(entries, no_git, msg):
 def cmd_add(a):
     try:
         raw = json.loads(a.json)
+        if a.event_id:
+            if not isinstance(raw, dict):
+                raise ValueError("--event-id 只能配单个对象；数组请在每个对象里写 event_id 字段")
+            raw = {**raw, "event_id": a.event_id}
         entries = [validate(e) for e in (raw if isinstance(raw, list) else [raw])]
     except ValueError as ex:
         die(f"life: 拒绝写入：{ex}", 2)
@@ -165,6 +180,7 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("add")
     s.add_argument("--json", required=True)
+    s.add_argument("--event-id", help="日历事件稳定 id（单个对象时）；数组请在对象里写 event_id 字段")
     s.add_argument("--no-git", action="store_true", help="只写文件不碰 git（测试用）")
     s.set_defaults(fn=cmd_add)
     s = sub.add_parser("done")

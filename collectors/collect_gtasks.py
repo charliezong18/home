@@ -18,7 +18,7 @@ import os
 import subprocess
 import sys
 
-from common import die, log, now_iso, save_snapshot
+from common import die, log, now_iso, redact_email, save_snapshot
 
 # 公共仓不写账号相关的真实列表 ID：@default = Tasks API 的默认列表（My Tasks）；要换列表用环境变量
 LIST_ID = os.environ.get("AI_HOME_GTASKS_LIST", "@default")
@@ -69,7 +69,7 @@ def fetch(runner=subprocess.run, list_id=LIST_ID):
         except OSError as e:
             raise RuntimeError(f"gog 起不来：{e}") from None
         if r.returncode != 0:
-            raise RuntimeError(f"gog rc={r.returncode}: {(r.stderr or '').strip()[:200]}")
+            raise RuntimeError(f"gog rc={r.returncode}: {redact_email((r.stderr or '').strip())[:200]}")
         try:
             items, token = _page_items(json.loads(r.stdout or "null"))
         except ValueError as e:
@@ -114,7 +114,7 @@ def from_snapshot(snap, st, today):
     """build_home 用：快照 + status.json 里的 gtasks 段 → todos；从没跑过 → None（客户端不显示该栏）。"""
     st = st or {}
     failing = int(st.get("consecutive_failures") or 0) > 0
-    error = (st.get("last_error_msg") or "采集失败")[:200] if failing else None
+    error = redact_email(st.get("last_error_msg") or "采集失败")[:200] if failing else None
     if not snap and not failing:
         return None
     data = (snap or {}).get("data") or {}
