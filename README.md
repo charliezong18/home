@@ -91,13 +91,14 @@ Mac mini dibao :8766
 | GET | `/v1/notes/pending` | = `apply_edits --list-pending-notes` |
 | POST | `/v1/notes/{id}/done` | `{result}` = `--mark-done` |
 | POST | `/v1/push/test` | `{title?, body?, url?}` → 立刻发一条推送（APNs，无设备则 ntfy）；`200 {result, apns}`，没送达 `502`。**会真发** |
+| POST | `/v1/digest/{morning\|evening}` | 立刻发早 / 晚报（今天已发过 `dup`）；`{dry_run:true}` 只返回内容。**会真发** |
 | POST | `/v1/collect` | `{sources?:["menxia","dashboard"]}` → `202 {job}`，异步跑一轮（采集器子进程 120 s 超时 → build）；源名不对 400 |
 | GET | `/v1/collect/{job}` | `{id, state: running/done/error, sources, result}` |
 
 ```bash
 make install     # 建 ~/.config/dibao、~/Library/Logs/dibao，拷 plist，launchctl bootstrap，打 /health（由 Hermes 执行）
 make health / make uninstall / make test
-python3 service/cli.py health | edits --json '…' | readings-add --url URL --why 理由 | notes-pending | note-done --id ID --result 文本 | collect
+python3 service/cli.py health | edits --json '…' | readings-add --url URL --why 理由 | notes-pending | note-done --id ID --result 文本 | collect | digest morning|evening [--dry-run|--send]
 python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<临时 git 仓> DIBAO_PORT=<端口>，绝不指向真实 review-home-data
 ```
 
@@ -120,6 +121,13 @@ python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<�
   | 附言处理完 | `POST /v1/notes/{id}/done` | `note-<id>` | 附言已处理：卡标题 | `menxia://home?id=<target>` |
   | 采集连续失败 ≥3 | 重算后 `sources[*].consecutive_failures` | `fail-<源>-<日期>` | 邸报采集 <源> 连续失败 | `menxia://home` |
   | 到期当天 | 本地 07:30 起每天一次，扫 `projects[].deadline` 与 `due[].date` | `due-<id>-<日期>` | 今天截止：标题 | `menxia://home?id=<id>` |
+  | 早报 | 洛杉矶 08:00，30 分钟内补发 | `digest-morning-<日期>` | 今天到期 / 3 天内到期 / 待你拍（折数 + 最老一折）/ 过期待处理 / 今日待办计数 | `menxia://home` |
+  | 晚报 | 洛杉矶 21:30，30 分钟内补发 | `digest-evening-<日期>` | 今天进展（画可的折、经邸报勾完成的待办数）/ 今天新到的折 / 明天第一件事 | `menxia://home`（App 暂无跳「待审」tab 的深链） |
+
+- **早晚报**（`service/digest.py`，纯函数；`Service.digest_tick` 跟到期扫描同一个每分钟线程）：时区固定 `America/Los_Angeles`（不看系统时区）。同一天每类最多一条：键带日期记在 `pushed.jsonl`，重启后读回不重发。Mac mini 睡眠 / 服务重启错过时间点：30 分钟内醒来补发，超过就当天跳过。送达失败不记账，窗口内每分钟重试。当天没内容只发一行（「今天没有到期和待拍」/「今天没有新进展，明天暂无安排」）。
+  - **脱敏**：折带 `签:身份` / `签:健康` / `签:钱` / `签:法务` / `签:雇主` / `签:niw` 或 `proj:niw|健康|法务|雇主`，或任何条目标题含金额（`$120`、`300 元`、`3万`…）→ 正文只写「N 件私密事项」，不出标题和折号（锁屏与展开都一样）。
+  - **数据**：`collect_menxia` 给折补 `qian`（`签:` 标签值），另取一页最近更新的已关 PR → `folders.merged_recent`（近 2 天合并的折，晚报「今天画可」用；取不到不影响主采集，晚报就不写这一项）。「今天新到」= 未关折里 `created` 落在洛杉矶今天的（取自 `folders.oldest`，每组最多 20 条）。
+  - **演练 / 手动**：`python3 service/cli.py digest morning --dry-run`（本地读 home.json 与 `todo-actions.jsonl` 打印标题 / 正文 / 是否今天已发，不连服务、不发、不写文件）；`cli.py digest evening --send` 经 `POST /v1/digest/evening` 立刻发（**会真发**；今天已发过返回 `dup`）。`POST /v1/digest/{kind}` 带 `{"dry_run": true}` 只返回内容。
 
 - **ntfy 兜底**：没有 active 设备（含未配置 `[apns]`）或所有设备都失败 → 同一条走 `collectors/notify.send` 发到 config.toml `[ntfy]` 段配的 topic（topic 是凭据，不进仓库；过渡期 `legacy_topic` 双发），`Click` 头带深链；APNs 至少一台成功就不发 ntfy。例外：采集失败事件**不**走 ntfy（`status.py` 在连败 3 次时已自己推过 ntfy，再发一遍是重复）。`AI_HOME_NTFY_DRYRUN=1` 时 ntfy 只打印。未送达的事件不记入去重集合，下次扫描重试。
 - **手动发一条（会真发）**：`python3 service/cli.py push-test --title 测试 --body 门下推送 --url 'menxia://home'`（走 `POST /v1/push/test`，所以 `/health.apns.last_push` 会更新）。`/health` 的 `apns` = `{configured, devices, last_push, last_error}`。

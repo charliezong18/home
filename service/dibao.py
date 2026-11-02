@@ -31,6 +31,7 @@ import build_home  # noqa: E402
 import config  # noqa: E402
 import ledger  # noqa: E402
 import apns  # noqa: E402
+import digest  # noqa: E402
 import events  # noqa: E402
 import todo_actions  # noqa: E402
 import dibao_sched as sched  # noqa: E402  (renamed: avoid shadowing stdlib sched)
@@ -118,6 +119,37 @@ class Service:
         if (t.tm_hour, t.tm_min) >= DUE_SCAN_AT and self.due_done != today:
             self.due_done = today
             self.notifier.scan_due(read_json(HOME_JSON, {}) or {}, today)
+
+    # ---------- 早晚报（digest.py：08:00 / 21:30 洛杉矶，30 分钟内补发，同天每类一条）----------
+    def build_digest(self, kind, now=None):
+        day = digest.now_la(now).date().isoformat()
+        done = digest.todos_done_today(todo_actions.read_records(TODO_ACTIONS), day)
+        d = digest.build(kind, read_json(HOME_JSON, {}) or {}, day, done)
+        d["already_sent"] = d["key"] in self.notifier.pushed
+        return d
+
+    def send_digest(self, kind, now=None):
+        """组装并发送（去重键带日期：今天已发过返回 'dup'）。返回 (结果, 内容)。"""
+        d = self.build_digest(kind, now)
+        res = self.notifier.push(d["key"], d["title"], d["body"], d["url"])
+        log.info("digest %s %s → %s", kind, d["day"], res)
+        return res, d
+
+    def digest_tick(self, now=None):
+        """每分钟：落在某类的补发窗口内且今天没发过 → 发；窗口外（未到 / 已错过超过 30 分钟）不发。"""
+        out = {}
+        for kind in digest.SLOTS:
+            day = digest.slot_day(kind, now)
+            if day and digest.key(kind, day) not in self.notifier.pushed:
+                out[kind] = self.send_digest(kind, now)[0]
+        return out
+
+    def post_digest(self, kind, body):
+        body = body or {}
+        if body.get("dry_run"):
+            return 200, {"digest": self.build_digest(kind)}
+        res, d = self.send_digest(kind)
+        return (200 if res in ("apns", "ntfy", "dup") else 502), {"result": res, "digest": d}
 
     def push_test(self, body):
         body = body or {}
@@ -253,6 +285,10 @@ class Service:
                     self.due_tick()
                 except Exception:  # noqa: BLE001
                     log.exception("到期扫描异常")
+                try:
+                    self.digest_tick()
+                except Exception:  # noqa: BLE001
+                    log.exception("早晚报异常")
 
         threading.Thread(target=due_loop, name="due", daemon=True).start()
         if self.push:
@@ -452,6 +488,8 @@ def make_handler(svc):
                     return self._send(*svc.note_done(m.group(1), self._body()))
                 if method == "POST" and (m := re.fullmatch(r"/v1/todos/([^/]+)/(complete|undo)", path)):
                     return self._send(*svc.post_todo(m.group(1), m.group(2), self._body()))
+                if method == "POST" and (m := re.fullmatch(r"/v1/digest/(morning|evening)", path)):
+                    return self._send(*svc.post_digest(m.group(1), self._body()))
                 if method == "POST" and path == "/v1/push/test":
                     return self._send(*svc.push_test(self._body()))
                 if method == "POST" and path == "/v1/collect":
