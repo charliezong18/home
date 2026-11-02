@@ -27,7 +27,7 @@ CORE_SOURCES = ("menxia", "dashboard")
 STALE_FAILS = 3
 STALE = {"morning": "邸报数据过期，早报暂缺（{why}）", "evening": "邸报数据过期，晚报暂缺（{why}）"}
 # App（menxia-ios HomeLink）目前只认 menxia://home（邸报）/ ?id= / ?pr=，没有跳「待审」tab 的深链；晚报暂时也跳邸报。
-URLS = {"morning": "menxia://home", "evening": "menxia://home"}
+URLS = {"morning": "menxia://home", "evening": "menxia://home?tab=open"}  # 晚报点开进「待审」（menxia-ios #36 起支持）
 TITLES = {"morning": "早报", "evening": "晚报"}
 EMPTY = {"morning": "今天没有到期和待拍", "evening": "今天没有新进展，明天暂无安排"}
 WEEK = "一二三四五六日"
