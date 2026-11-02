@@ -11,11 +11,13 @@ import time
 from urllib.parse import quote
 
 import apns as apns_mod
+import digest          # 脱敏规则与早晚报共用（签: / proj: 受保护标签、金额、due[] 的 private: true）
 
 log = logging.getLogger("dibao.events")
 DEDUP_DAYS = 7
 PERMANENT = ("fold-", "note-", "baseline-")
 FAIL_AFTER = 3
+PRIVATE = "1 件私密事项"
 
 
 def state_path():
@@ -114,7 +116,8 @@ class Notifier:
             self._record("baseline-folds")
         else:
             for f in folds:
-                out.append(self.push(f"fold-{f['n']}", "待你拍", f"#{f['n']} {f.get('title', '')}", f"menxia://?pr={f['n']}"))
+                body = PRIVATE if digest.fold_private(f) else f"#{f['n']} {f.get('title', '')}"   # 私密：不露标题与折号
+                out.append(self.push(f"fold-{f['n']}", "待你拍", body, f"menxia://?pr={f['n']}"))
         today = time.strftime("%Y-%m-%d", time.localtime(self.clock()))
         for src, s in (home.get("sources") or {}).items():
             if int(s.get("consecutive_failures") or 0) >= FAIL_AFTER:
@@ -123,14 +126,16 @@ class Notifier:
         return out
 
     def note_done(self, eid, title, target):
-        return self.push(f"note-{eid}", "邸报", f"附言已处理：{title or target}", home_url(target))
+        shown = PRIVATE if digest.has_money(title or target) else (title or target)
+        return self.push(f"note-{eid}", "邸报", f"附言已处理：{shown}", home_url(target))
 
     def scan_due(self, home, today):
-        """每天 07:30 后跑一次：projects[].deadline 与 due[].date 等于今天的项。"""
-        items = [(p.get("id"), p.get("title"), p.get("deadline")) for p in home.get("projects") or []]
-        items += [(d.get("id"), d.get("title"), d.get("date")) for d in home.get("due") or []]
-        return [self.push(f"due-{i}-{today}", "邸报", f"今天截止：{t}", home_url(i))
-                for i, t, date in items if i and date == today]
+        """每天 07:30 后跑一次：projects[].deadline 与 due[].date 等于今天的项。私密项（金额 / private: true）不露标题。"""
+        items = [(p.get("id"), p, p.get("deadline")) for p in home.get("projects") or []]
+        items += [(d.get("id"), d, d.get("date")) for d in home.get("due") or []]
+        return [self.push(f"due-{i}-{today}", "邸报", f"今天截止：{PRIVATE if digest.item_private(it) else it.get('title')}",
+                          home_url(i))
+                for i, it, date in items if i and date == today]
 
     def health(self):
         iso = lambda ts: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None  # noqa: E731

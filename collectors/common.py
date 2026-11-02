@@ -30,6 +30,18 @@ def today_local():
     return _dt.date.today().isoformat()
 
 
+_EMAIL_RE = None
+
+
+def redact_email(text):
+    """外部命令（gog 等）的错误原文 → 邮箱换成 <email>；这些文本会进 home.json / todo-actions.jsonl。"""
+    global _EMAIL_RE
+    if _EMAIL_RE is None:
+        import re
+        _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+    return _EMAIL_RE.sub("<email>", text or "")
+
+
 def log(msg):
     print(f"[{_dt.datetime.now():%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
 

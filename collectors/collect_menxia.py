@@ -45,6 +45,12 @@ def folder_item(p):
     }
 
 
+def recent_open(items):
+    """全部 open 折按 created 降序取前 RECENT_N（含 qian / proj）：晚报「今天新到」用。
+    oldest 每组只留最旧 OLDEST_N 条，组大时当天新到的折会被截掉（F-08）。"""
+    return sorted(items, key=lambda x: x["created"], reverse=True)[:RECENT_N]
+
+
 def recent_merged(prs, now=None):
     """已关 PR（按 updated 倒序）→ 近 RECENT_DAYS 天合并（画可）的折 [{n, title, merged_at, kind, proj, qian}]。"""
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -75,7 +81,8 @@ def main():
     for key in groups:
         groups[key] = sorted(groups[key], key=lambda x: x["created"])[:OLDEST_N]
     library = sorted([it for it in items if it["kind"] == "读物"], key=lambda x: x["created"], reverse=True)
-    data = {"total": len(items), "counts": counts, "oldest": groups, "library": library}
+    data = {"total": len(items), "counts": counts, "oldest": groups, "library": library,
+            "recent_open": recent_open(items)}
     try:
         data["recent_closed"] = recent_merged(json.loads(run(
             ["gh", "api", f"repos/{REPO}/pulls?state=closed&sort=updated&direction=desc&per_page={RECENT_N}"],

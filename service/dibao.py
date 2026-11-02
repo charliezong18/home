@@ -64,6 +64,8 @@ class Service:
         self.due_done = None
         digest.configure(cfg.digest)                      # 本机 config.toml [digest] 的额外受保护 label
         self.todo_runner = subprocess.run                 # gog 子进程入口；测试换成假 gog
+        self.todo_sleep = time.sleep                      # gog 瞬时失败的退避等待；测试换成不睡
+        self.todo_lock = threading.Lock()                 # 同时只跑一批 todo-actions（不与 svc 嵌套持有，见 process_todos）
         self.recollect_gtasks = lambda: self.sched.run_source("gtasks")  # 勾完后立刻重采 gtasks；测试可换
         # build_home 直接 import 复用，但它的 sync_down / commit_and_push 换成本服务的（只本地提交，push 走防抖线程）
         build_home.sync_down = lambda: None
@@ -125,7 +127,11 @@ class Service:
     def build_digest(self, kind, now=None):
         day = digest.now_la(now).date().isoformat()
         done = digest.todos_done_today(todo_actions.read_records(TODO_ACTIONS), day)
-        d = digest.build(kind, read_json(HOME_JSON, {}) or {}, day, done)
+        home = read_json(HOME_JSON, {}) or {}
+        stale = digest.stale_reason(home, now)                 # 缺失 / 过期 / 主要源连挂 → 不发「空日」
+        if stale:
+            log.warning("digest %s %s：数据不可信（%s），改发过期提示", kind, day, stale)
+        d = digest.build(kind, home, day, done, stale=stale)
         d["already_sent"] = d["key"] in self.notifier.pushed
         return d
 
@@ -184,31 +190,41 @@ class Service:
         self.rebuild()
         return lines
 
-    def process_todos(self):
-        """执行 todo-actions.jsonl 里未处理的勾完成 / 撤销。返回 {id: 状态行}。每条只执行一次，失败不重试。"""
-        with self.svc:
-            with data_lock():
-                _, _, todo = todo_actions.summarize(todo_actions.read_records(TODO_ACTIONS), todo_actions.local_done())
+    def process_todos(self, wait=True):
+        """执行 todo-actions.jsonl 里未处理的勾完成 / 撤销。返回 {id: 状态行}。每条只执行一次（瞬时错误在 execute 里退避重试）。
+
+        执行 gog 时不持 self.svc（单条最长数分钟，不能挡住 /v1/edits、/v1/todos 追加与 sync）；只在读账本 / 写状态行时短持。
+        同一时刻只有一批在执行（todo_lock）；wait=False 时有批在跑就直接返回 None（调用方回 202，下一轮 sync 会接手）。
+        调用方不得持 self.svc（锁序 todo_lock → svc → data_lock）。"""
+        if not self.todo_lock.acquire(blocking=wait):
+            return None
+        try:
+            with self.svc:
+                with data_lock():
+                    _, _, todo = todo_actions.summarize(todo_actions.read_records(TODO_ACTIONS), todo_actions.local_done())
             if not todo:
                 return {}
             lines = {}
             for a in todo:                                   # 文件顺序：先勾后撤销 = 最终未完成
-                state, detail = todo_actions.execute(a, self.todo_runner)
+                state, detail = todo_actions.execute(a, self.todo_runner, sleep=self.todo_sleep)
                 line = todo_actions.state_line(a["id"], state, detail, now_iso())
                 todo_actions.remember(line)
                 lines[a["id"]] = line
                 log.info("todo %s %s %s → %s %s", a["id"], a.get("op"), a.get("task_id"), state, detail)
-            with data_lock():
-                for line in lines.values():
-                    ledger.append(TODO_ACTIONS, line)
-                self._commit(["todo-actions.jsonl"], f"todos: apply {len(lines)}")
-            if any(x["state"] == "done" for x in lines.values()):
-                try:
-                    self.recollect_gtasks()
-                except Exception:  # noqa: BLE001
-                    log.exception("勾完后重采 gtasks 失败")
-            self.rebuild()
+            with self.svc:
+                with data_lock():
+                    for line in lines.values():
+                        ledger.append(TODO_ACTIONS, line)
+                    self._commit(["todo-actions.jsonl"], f"todos: apply {len(lines)}")
+                if any(x["state"] == "done" for x in lines.values()):
+                    try:
+                        self.recollect_gtasks()
+                    except Exception:  # noqa: BLE001
+                        log.exception("勾完后重采 gtasks 失败")
+                self.rebuild()
             return lines
+        finally:
+            self.todo_lock.release()
 
     def post_todo(self, task_id, op, body):
         """本机端点 POST /v1/todos/<id>/complete|undo：追加首行 → 立刻执行。body 可带 id（幂等键）/ title / from。"""
@@ -225,7 +241,8 @@ class Service:
                 if a["id"] not in first:
                     ledger.append(TODO_ACTIONS, a)
                     self._commit(["todo-actions.jsonl"], f"todos: + {op} {a['id']}")
-            line = final.get(a["id"]) or self.process_todos().get(a["id"])
+        # 执行在 svc 之外；已有一批在跑就不等（返回 202 pending，下一轮 sync 处理）
+        line = final.get(a["id"]) or (self.process_todos(wait=False) or {}).get(a["id"])
         if not line:
             return 202, {"action": {**a, "state": "pending"}}
         out = {k: v for k, v in {**a, **line}.items() if k in ("id", "task_id", "op", "state", "result", "error")}
@@ -248,10 +265,11 @@ class Service:
                 after = self._head()
             self.last_sync_down = now_iso()
             done = self.process_pending()
-            try:
-                done = self.process_todos() or done          # 网页 / iOS 经 GitHub 追加的勾完成；跟 sync 同频（≤ sync_down_secs）
-            except Exception:  # noqa: BLE001
-                log.exception("todo-actions 处理异常")
+        try:                                                 # 不持 svc：gog 慢时不挡其他写接口（见 process_todos）
+            done = self.process_todos() or done              # 网页 / iOS 经 GitHub 追加的勾完成；跟 sync 同频（≤ sync_down_secs）
+        except Exception:  # noqa: BLE001
+            log.exception("todo-actions 处理异常")
+        with self.svc:
             if after != before and not done:
                 self.rebuild()
             if self.push and git("rev-list", "--count", f"origin/{BRANCH}..HEAD", check=False).stdout.strip() not in ("", "0"):

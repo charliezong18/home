@@ -105,6 +105,40 @@ class BuildHomeReadingsTest(unittest.TestCase):
         self.assertEqual(t["synced_at"], "2026-10-31T18:00:00Z")
         self.assertFalse(self.home()["sources"]["gtasks"]["ok"])
 
+    def test_main_todos_failed_from_actions(self):
+        """F-02 服务端：最近 24 h 失败的勾完成 → todos.failed [{task_id, error}]，不含标题、邮箱脱敏。"""
+        self.write_ledger(json.dumps(reading("link-a", "A")))
+        common.write_json(os.path.join(self.cache, "snapshot-gtasks.json"), {"source": "gtasks", "fetched": "2026-10-31T18:00:00Z",
+                          "data": {"tasks": [{"id": "t1", "title": "示例待办", "due": None}]}})
+        now = build_home.dt.datetime.now(build_home.dt.timezone.utc)
+        iso = lambda h: (now - build_home.dt.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        recs = [{"id": "a1", "op": "complete", "task_id": "t1", "title": "示例秘密标题", "state": "pending", "ts": iso(2)},
+                {"id": "a1", "state": "failed", "ts": iso(2), "error": "gog done rc=1: auth for demo.user@example.com"},
+                {"id": "a2", "op": "complete", "task_id": "t2", "title": "示例旧失败", "state": "pending", "ts": iso(30)},
+                {"id": "a2", "state": "failed", "ts": iso(30), "error": "x"},                 # 超过 24 h
+                {"id": "a3", "op": "complete", "task_id": "t3", "title": "示例", "state": "pending", "ts": iso(3)},
+                {"id": "a3", "state": "failed", "ts": iso(3), "error": "x"},
+                {"id": "a4", "op": "complete", "task_id": "t3", "title": "示例", "state": "pending", "ts": iso(1)},
+                {"id": "a4", "state": "done", "ts": iso(1), "result": "ok"}]                 # 之后重勾成功
+        with open(os.path.join(self.data, "todo-actions.jsonl"), "w", encoding="utf-8") as f:
+            f.write("\n".join(json.dumps(r, ensure_ascii=False) for r in recs) + "\n{坏行\n")
+        self.assertEqual(build_home.main(), 0)
+        failed = self.home()["todos"]["failed"]
+        self.assertEqual([x["task_id"] for x in failed], ["t1"])
+        self.assertEqual(set(failed[0]), {"task_id", "error"})
+        self.assertNotIn("demo.user@example.com", failed[0]["error"])
+        self.assertIn("<email>", failed[0]["error"])
+        self.assertNotIn("示例秘密标题", json.dumps(self.home()["todos"], ensure_ascii=False))
+        self.assertLessEqual(len(failed[0]["error"]), build_home.FAILED_ERR_MAX)
+
+    def test_gtasks_error_email_redacted(self):
+        """F-20：gog stderr 里的邮箱不进 home.json todos.error。"""
+        t = build_home.collect_gtasks.from_snapshot(None, {"consecutive_failures": 1,
+                                                           "last_error_msg": "gtasks FAIL: gog rc=1: no token for demo.user@example.com"},
+                                                    build_home.dt.date(2026, 11, 2))
+        self.assertNotIn("demo.user@example.com", t["error"])
+        self.assertIn("<email>", t["error"])
+
     def test_main_unreadable_ledger_keeps_previous_readings(self):
         self.write_ledger(json.dumps(reading("link-a", "A")))
         self.assertEqual(build_home.main(), 0)
@@ -114,6 +148,34 @@ class BuildHomeReadingsTest(unittest.TestCase):
         home = self.home()
         self.assertEqual([r["rid"] for r in home["readings"]], ["r:a"])   # 沿用上一份，不写空列表
         self.assertFalse(home["sources"]["readings"]["ok"])
+
+
+class DueMergeTest(unittest.TestCase):
+    """F-04：同一日历事件三种标题写法（括注 / 无括注 / ⏰ 前缀 + 全角加号）→ due 只剩 1 条。"""
+
+    def test_calendar_variants_collapse_to_latest(self):
+        life = [{"id": f"d:cal-v{i}", "title": t, "date": "2026-11-01", "note": "09:40", "source": "calendar"}
+                for i, t in enumerate(("示例：体检+预约（线上）", "示例：体检+预约", "⏰ 示例：体检＋预约"))]
+        life.append({"id": "d:cal-other", "title": "示例：体检+预约", "date": "2026-11-01", "note": "15:00",
+                     "source": "calendar"})                                        # 不同时间 = 不同事件
+        life.append({"id": "d:parcel-1", "title": "示例：体检+预约", "date": "2026-11-01", "note": "09:40",
+                     "source": "gmail"})                                           # 非日历不归并
+        due = build_home.due_items({}, life, build_home.dt.date(2026, 10, 30))
+        self.assertEqual([d["id"] for d in due], ["d:cal-v2", "d:cal-other", "d:parcel-1"])
+
+    def test_norm_title(self):
+        self.assertEqual(build_home.norm_title("⏰ 示例：体检＋预约"), build_home.norm_title("示例:体检+预约 (线上)"))
+        self.assertNotEqual(build_home.norm_title("示例：体检"), build_home.norm_title("示例：牙医"))
+
+
+class RecentOpenTest(unittest.TestCase):
+    def test_recent_open_newest_first_with_qian(self):
+        """F-08：recent_open 按 created 降序，不受 oldest 每组 20 条的截断影响。"""
+        import collect_menxia
+        items = [{"n": i, "title": f"示例{i}", "created": f"2026-10-{i:02d}T00:00:00Z", "qian": []} for i in range(1, 26)]
+        out = collect_menxia.recent_open(items)
+        self.assertEqual(out[0]["n"], 25)
+        self.assertIn("qian", out[0])
 
 
 CARD = """---

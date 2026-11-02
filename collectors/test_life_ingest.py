@@ -103,3 +103,38 @@ class AutoIdTest(unittest.TestCase):
         self.assertRegex(a["id"], r"^d:cal-[0-9a-f]{8}$")
         self.assertNotEqual(a["id"], L.validate({**e, "date": "2026-11-06"})["id"])
 
+    def test_event_id_survives_title_change(self):
+        """F-04 摄入侧：有 event_id 就按它出 id，改标题仍是同一条；event_id 不进账本。"""
+        import life_ingest as L
+        e = {"title": "示例：体检预约", "date": "2026-11-05", "source": "calendar", "event_id": "evt-demo-001"}
+        a = L.validate(dict(e))
+        b = L.validate({**e, "title": "⏰ 示例：体检预约（改）"})
+        self.assertEqual(a["id"], b["id"])
+        self.assertRegex(a["id"], r"^d:cal-[0-9a-f]{12}$")
+        self.assertNotIn("event_id", a)
+        self.assertNotEqual(a["id"], L.validate({**e, "event_id": "evt-demo-002"})["id"])
+
+
+class EventIdCliTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = mock.patch.object(li, "DATA_DIR", self.tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_event_id_flag_updates_same_row_and_private(self):
+        e = {"title": "示例会议", "date": "2026-11-05", "note": "14:00", "source": "calendar"}
+        li.main(["add", "--json", json.dumps(e), "--event-id", "evt-demo-9", "--no-git"])
+        li.main(["add", "--json", json.dumps({**e, "title": "示例会议（改期说明）", "private": True}),
+                 "--event-id", "evt-demo-9", "--no-git"])
+        items, _ = li.load_life()
+        self.assertEqual(len(items), 1)
+        self.assertEqual((items[0]["title"], items[0].get("private")), ("示例会议（改期说明）", True))
+        li.main(["add", "--json", json.dumps([{**e, "event_id": "evt-demo-9", "private": False}]), "--no-git"])
+        self.assertNotIn("private", li.load_life()[0][0])                          # 可撤回 private
+        with self.assertRaises(SystemExit):                                         # --event-id 不配数组
+            li.main(["add", "--json", json.dumps([e]), "--event-id", "x", "--no-git"])
+        with self.assertRaises(ValueError):
+            li.validate({**e, "private": "yes"})
+
