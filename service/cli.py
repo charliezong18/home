@@ -10,6 +10,8 @@
   cli.py push-test [--title T] [--body B] [--url menxia://home]   手动发一条推送（APNs，无设备则 ntfy）；会真发，验收用
   cli.py todo-done <task_id> [--title T]          把一条 Google Tasks 标完成（会真改 Google Tasks）
   cli.py todo-undo <task_id> [--title T]          撤销完成（标回未完成）
+  cli.py digest morning|evening [--dry-run]       早 / 晚报：本地读 home.json 打印将推内容，不发、不连服务（缺省即 dry-run）
+  cli.py digest morning|evening --send            立刻经服务发一条（会真发；今天已发过返回 dup，不重发）
 输出响应 JSON；HTTP 非 2xx 退出码 1（todo 执行失败 = HTTP 502）。连不上 / 超时输出 {"ok": false, "error": …}，退出码 1。
 """
 import argparse
@@ -37,6 +39,37 @@ def call(port, method, path, body=None):
         return None, {"ok": False, "error": f"{type(reason).__name__}: {reason}"[:300]}
 
 
+def digest_dry_run(kind, now=None, out=print, digest_cfg=None):
+    """本地组装（与服务同一套 digest.build + 本机 config.toml [digest]），不发送、不连服务、不写任何文件。
+    digest_cfg 可注入（测试用）；None = 读本机配置。"""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    for p in (here, os.path.join(os.path.dirname(here), "collectors")):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    import digest
+    import events
+    import todo_actions
+    from common import DATA_DIR, read_json
+    if digest_cfg is None:
+        import config
+        digest_cfg = config.load().digest
+    digest.configure(digest_cfg)
+    day =digest.now_la(now).date().isoformat()
+    done = digest.todos_done_today(todo_actions.read_records(os.path.join(DATA_DIR, "todo-actions.jsonl")), day)
+    d = digest.build(kind, read_json(os.path.join(DATA_DIR, "home.json"), {}) or {}, day, done)
+    sent = False
+    try:
+        with open(events.state_path(), encoding="utf-8") as f:
+            sent = any(json.loads(line).get("key") == d["key"] for line in f if line.strip().startswith("{"))
+    except (OSError, ValueError):
+        pass
+    out(f"[dry-run] {kind} {day}  key={d['key']}  今天已发过={'是' if sent else '否'}  url={d['url']}")
+    out(f"标题：{d['title']}")
+    out("正文：\n" + d["body"])
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--port", type=int, default=8766)
@@ -60,8 +93,17 @@ def main(argv=None):
         p = sub.add_parser(name)
         p.add_argument("task_id")
         p.add_argument("--title", default="")
+    p = sub.add_parser("digest")
+    p.add_argument("kind", choices=["morning", "evening"])
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--dry-run", action="store_true", help="只打印将推内容（缺省）")
+    g.add_argument("--send", action="store_true", help="经服务真发")
     a = ap.parse_args(argv)
-    if a.cmd == "health":
+    if a.cmd == "digest" and not a.send:
+        return digest_dry_run(a.kind)
+    if a.cmd == "digest":
+        code, out = call(a.port, "POST", f"/v1/digest/{a.kind}", {})
+    elif a.cmd == "health":
         code, out = call(a.port, "GET", "/health")
     elif a.cmd == "notes-pending":
         code, out = call(a.port, "GET", "/v1/notes/pending")
