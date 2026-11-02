@@ -12,6 +12,11 @@ log_file = "~/Library/Logs/dibao/api.log"   # 1 MB × 3 轮转
 # legacy_topic = "..."                       # 可选：换 topic 过渡期双发，手机订阅新 topic 后删掉
 # server = "https://ntfy.sh"                 # 可选
 
+# 早晚报脱敏：代码内置 签:身份 / 签:健康 / 签:钱；额外的受保护 label 只写在本机 config.toml（不进仓库）。缺省空。
+# [digest]
+# protected_qian = ["示例私密"]              # 折带 签:<值> 即在推送里只显示「N 件私密事项」
+# protected_proj = ["示例私密项目"]          # 折带 proj:<值> 同上
+
 # APNs 推送（Charlie 建好 Auth Key 后再取消注释；删掉整段 = 回到 ntfy-only）
 # [apns]
 # key_id = "ABCDE12345"                      # Apple Developer → Keys 里的 Key ID
