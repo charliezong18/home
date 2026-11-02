@@ -62,6 +62,7 @@ class Service:
         self.sched = sched.Scheduler(self)
         self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
         self.due_done = None
+        digest.configure(cfg.digest)                      # 本机 config.toml [digest] 的额外受保护 label
         self.todo_runner = subprocess.run                 # gog 子进程入口；测试换成假 gog
         self.recollect_gtasks = lambda: self.sched.run_source("gtasks")  # 勾完后立刻重采 gtasks；测试可换
         # build_home 直接 import 复用，但它的 sync_down / commit_and_push 换成本服务的（只本地提交，push 走防抖线程）

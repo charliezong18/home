@@ -95,15 +95,40 @@ class ContentTest(unittest.TestCase):
         h["folders"]["oldest"]["你拍"] = [fold(102, "示例：书架排序方案")]
         self.assertEqual(digest.evening(h, DAY)[-1], "明天第一件事：拍 #102 示例：书架排序方案")
 
+    def tearDown(self):
+        digest.configure({})                                     # 每个用例后回到通用缺省
+
     def test_sensitive_never_shows_title(self):
+        digest.configure({"protected_qian": ["示例私密"], "protected_proj": ["示例私密项目"]})   # 注入的配置
         h = sample_home()
-        h["folders"]["oldest"]["你拍"] = [fold(7, "某雇主谈判", proj=["雇主"]), fold(8, "报销 ¥300"),
-                                         fold(9, "季度账单", qian=["钱"])]
-        h["folders"]["counts"]["你拍"] = 3
+        h["folders"]["oldest"]["你拍"] = [fold(7, "示例甲方谈判", proj=["示例私密项目"]), fold(8, "报销 ¥300"),
+                                         fold(9, "季度账单", qian=["钱"]), fold(10, "示例档案", qian=["示例私密"])]
+        h["folders"]["counts"]["你拍"] = 4
+        h["folders"]["merged_recent"].append({"n": 93, "title": "示例档案归档", "merged_at": "2026-11-02T22:00:00Z",
+                                              "qian": ["示例私密"], "proj": []})
         for kind in ("morning", "evening"):
             body = digest.build(kind, h, DAY)["body"]
-            for secret in ("体检", "签证", "交水费", "$120", "雇主", "¥300", "季度账单", "#101", "#91", "#7 "):
+            for secret in ("体检", "签证", "交水费", "$120", "甲方", "¥300", "季度账单", "示例档案",
+                           "#101", "#91", "#93", "#7 "):
                 self.assertNotIn(secret, body, f"{kind} 泄露 {secret}")
+        self.assertIn("画可 3 折（示例：首页改版，另 2 件私密事项）", digest.build("evening", h, DAY)["body"])
+
+    def test_default_protection_without_config(self):
+        self.assertEqual(digest.configure({}), ({"身份", "健康", "钱"}, set()))
+        self.assertTrue(digest.fold_private(fold(1, "x", qian=["健康"])))
+        self.assertFalse(digest.fold_private(fold(2, "x", qian=["示例私密"])))      # 没配就不算受保护
+        self.assertFalse(digest.fold_private(fold(3, "x", proj=["示例私密项目"])))
+        digest.configure({"protected_qian": ["示例私密"], "protected_proj": ["示例私密项目"]})
+        self.assertTrue(digest.fold_private(fold(2, "x", qian=["示例私密"])))
+        self.assertTrue(digest.fold_private(fold(3, "x", proj=["示例私密项目"])))
+
+    def test_config_toml_digest_section(self):
+        path = os.path.join(tempfile.mkdtemp(prefix="digest-cfg-"), "config.toml")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write('[digest]\nprotected_qian = ["示例私密"]\nprotected_proj = ["示例私密项目"]\n')
+        cfg = config.load(path)
+        self.assertEqual(cfg.digest, {"protected_qian": ["示例私密"], "protected_proj": ["示例私密项目"]})
+        self.assertEqual(config.load(path + ".missing").digest, {})
 
     def test_money_detection(self):
         for t in ("付 $45", "退款 1,200 元", "3万首付", "¥88", "年费 99 USD"):
@@ -246,7 +271,7 @@ class CliDryRunTest(unittest.TestCase):
             with redirect_stdout(buf):
                 rc = cli.main(["digest", "evening", "--dry-run"])
             lines = []
-            cli.digest_dry_run("morning", now=utc("2026-11-02T16:00:00"), out=lines.append)
+            cli.digest_dry_run("morning", now=utc("2026-11-02T16:00:00"), out=lines.append, digest_cfg={})
         finally:
             common.DATA_DIR, cli.call = saved, saved_call
         self.assertEqual(rc, 0)

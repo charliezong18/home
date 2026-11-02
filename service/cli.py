@@ -39,8 +39,9 @@ def call(port, method, path, body=None):
         return None, {"ok": False, "error": f"{type(reason).__name__}: {reason}"[:300]}
 
 
-def digest_dry_run(kind, now=None, out=print):
-    """本地组装（与服务同一套 digest.build），不发送、不连服务、不写任何文件。"""
+def digest_dry_run(kind, now=None, out=print, digest_cfg=None):
+    """本地组装（与服务同一套 digest.build + 本机 config.toml [digest]），不发送、不连服务、不写任何文件。
+    digest_cfg 可注入（测试用）；None = 读本机配置。"""
     import os
     here = os.path.dirname(os.path.abspath(__file__))
     for p in (here, os.path.join(os.path.dirname(here), "collectors")):
@@ -50,7 +51,11 @@ def digest_dry_run(kind, now=None, out=print):
     import events
     import todo_actions
     from common import DATA_DIR, read_json
-    day = digest.now_la(now).date().isoformat()
+    if digest_cfg is None:
+        import config
+        digest_cfg = config.load().digest
+    digest.configure(digest_cfg)
+    day =digest.now_la(now).date().isoformat()
     done = digest.todos_done_today(todo_actions.read_records(os.path.join(DATA_DIR, "todo-actions.jsonl")), day)
     d = digest.build(kind, read_json(os.path.join(DATA_DIR, "home.json"), {}) or {}, day, done)
     sent = False

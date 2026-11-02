@@ -15,8 +15,9 @@ GRACE = 30 * 60
 SOON_DAYS = 3
 MAX_TITLES = 3
 TITLE_MAX = 24
-PROTECTED_QIAN = {"身份", "健康", "钱", "法务", "雇主", "niw"}
-PROTECTED_PROJ = {"niw", "健康", "法务", "雇主"}
+DEFAULT_QIAN = frozenset({"身份", "健康", "钱"})     # 通用缺省；其余受保护 label 只在本机 config.toml [digest] 里设
+PROTECTED_QIAN = set(DEFAULT_QIAN)
+PROTECTED_PROJ = set()
 MONEY_RE = re.compile(r"[$¥￥€£]\s?\d|\d[\d,.]*\s?(?:元|块|美元|美金|刀|万|[kK]\b|USD|usd|RMB|rmb)")
 # App（menxia-ios HomeLink）目前只认 menxia://home（邸报）/ ?id= / ?pr=，没有跳「待审」tab 的深链；晚报暂时也跳邸报。
 URLS = {"morning": "menxia://home", "evening": "menxia://home"}
@@ -55,6 +56,16 @@ def la_date(iso):
 
 
 # ---------- 脱敏 ----------
+def configure(digest_cfg=None):
+    """config.toml [digest]：protected_qian / protected_proj（列表，缺省空）→ 在通用缺省之上追加。返回生效集合。"""
+    c = digest_cfg or {}
+    PROTECTED_QIAN.clear()
+    PROTECTED_QIAN.update(DEFAULT_QIAN, (str(x).lower() for x in c.get("protected_qian") or []))
+    PROTECTED_PROJ.clear()
+    PROTECTED_PROJ.update(str(x).lower() for x in c.get("protected_proj") or [])
+    return set(PROTECTED_QIAN), set(PROTECTED_PROJ)
+
+
 def has_money(title):
     return bool(MONEY_RE.search(title or ""))
 
