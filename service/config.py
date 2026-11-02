@@ -25,6 +25,7 @@ class Config:
     worker_cmd: list = field(default_factory=lambda: list(DEFAULT_WORKER))
     recollect_cmd: list = field(default_factory=lambda: list(DEFAULT_RECOLLECT))
     apns: dict = field(default_factory=dict)  # config.toml [apns]：key_path / key_id / team_id / bundle_id；空 = ntfy-only
+    digest: dict = field(default_factory=dict)  # config.toml [digest]：protected_qian / protected_proj（额外受保护 label，缺省空）
 
 
 def load(path=None):
@@ -37,6 +38,7 @@ def load(path=None):
             if hasattr(cfg, k):
                 setattr(cfg, k, v)
         cfg.apns = dict(toml.get("apns", {}))
+        cfg.digest = dict(toml.get("digest", {}))
     env = os.environ
     for key, attr in (("DIBAO_PORT", "port"), ("DIBAO_SYNC_SECS", "sync_down_secs"),
                       ("DIBAO_PUSH_DEBOUNCE", "push_debounce_secs"), ("DIBAO_COLLECT_SECS", "collect_secs"),
