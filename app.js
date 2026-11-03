@@ -673,18 +673,42 @@ const b64enc = (s) => {
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(bin);
 };
-const b64dec = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\s/g, '')), (c) => c.charCodeAt(0)));
+const b64bytes = (s) => Uint8Array.from(atob(s.replace(/\s/g, '')), (c) => c.charCodeAt(0));
 
-// GET 取 sha → 末尾追加一行 → PUT；别人同时写（409/422 sha 不符）重试 2 次
+// 账本追加契约（docs/LEDGER-APPEND.md，iOS DibaoStore 照此实现）：
+// 读到的字节数必须等于 Contents API 报的 size，否则拒绝写入——绝不把「读不全」当成「空文件」去覆盖。
+// > 1 MB 时 Contents API 给 encoding:"none"、content:""，改走 git/blobs/<sha>（≤100 MB，仍是 base64）。
+const LEDGER_MAX = 25 * 1024 * 1024;   // 超过就拒写、要求轮转（PUT 要整份重传，太大手机上传不动）
+async function readLedger(path, headers) {
+  const name = path.split('/').pop();
+  const g = await fetch(`${API}${path}?ref=home-data`, { cache: 'no-store', headers });
+  if (g.status === 404) return { text: '', sha: undefined };   // 文件还不存在：建新文件（PUT 不带 sha）
+  if (!g.ok) throw new Error(`读 ${name} 失败：GitHub ${g.status}`);
+  const j = await g.json();
+  const size = Number(j.size);
+  if (j.type !== 'file' || !j.sha || !Number.isInteger(size) || size < 0) throw new Error(`读 ${name} 失败：GitHub 返回的不是文件，拒绝写入`);
+  if (size > LEDGER_MAX) throw new Error(`${name} 已有 ${(size / 1048576).toFixed(1)} MB，超过上限，需先轮转，拒绝写入`);
+  let b64 = j.content || '';
+  if (j.encoding !== 'base64' || (!b64 && size > 0)) {
+    const b = await fetch(`${API}${path.split('/contents/')[0]}/git/blobs/${j.sha}`, { cache: 'no-store', headers });
+    if (!b.ok) throw new Error(`读 ${name} 全文失败：GitHub ${b.status}，拒绝写入`);
+    const bj = await b.json();
+    if (bj.encoding !== 'base64' || bj.sha !== j.sha) throw new Error(`读 ${name} 全文失败：blob 编码 ${bj.encoding}，拒绝写入`);
+    b64 = bj.content || '';
+  }
+  const bytes = b64bytes(b64);
+  if (bytes.length !== size) throw new Error(`读 ${name} 不完整（${bytes.length}/${size} 字节），拒绝写入`);
+  let text;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { throw new Error(`${name} 不是合法 UTF-8，拒绝写入`); }
+  return { text, sha: j.sha };
+}
+
+// 读全文 + sha → 末尾追加一行 → PUT；别人同时写（409/422 sha 不符）重试 2 次
 const appendEdit = (rec) => appendLine(EDITS_PATH, JSON.stringify(rec), `edits: ${rec.id} ${rec.target}`);
 async function appendLine(path, line, message) {
-  const name = path.split('/').pop();
   const headers = { Authorization: `Bearer ${getToken()}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
   for (let attempt = 0; attempt < 3; attempt++) {
-    const g = await fetch(`${API}${path}?ref=home-data`, { cache: 'no-store', headers });
-    let text = '', sha;
-    if (g.ok) { const j = await g.json(); text = b64dec(j.content || ''); sha = j.sha; }
-    else if (g.status !== 404) throw new Error(`读 ${name} 失败：GitHub ${g.status}`);
+    let { text, sha } = await readLedger(path, headers);
     if (text && !text.endsWith('\n')) text += '\n';
     const r = await fetch(API + path, {
       method: 'PUT', headers: { ...headers, 'Content-Type': 'application/json' },
