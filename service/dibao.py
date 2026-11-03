@@ -484,6 +484,14 @@ def make_handler(svc):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
             if host not in ("127.0.0.1", "localhost", "[::1]"):
                 return self._send(421, {"error": "只服务 127.0.0.1"})
+            # 防跨站：浏览器发的请求都带 Origin（或 Sec-Fetch-Site ≠ none）；本服务只给本机 CLI / 脚本用，一律拒。
+            # text/plain 的跨站 POST 不触发预检，所以写接口还必须是 application/json（浏览器跨站发它要预检，我们不回 CORS）。
+            if self.headers.get("Origin") is not None or (self.headers.get("Sec-Fetch-Site") or "none") != "none":
+                return self._send(403, {"error": "不接受浏览器跨站请求"})
+            if method in ("POST", "PATCH"):
+                ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                if ctype != "application/json":
+                    return self._send(415, {"error": "Content-Type 必须是 application/json"})
             path = self.path.split("?", 1)[0]
             try:
                 if method == "GET" and path == "/health":
