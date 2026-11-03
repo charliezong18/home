@@ -72,5 +72,32 @@ class DoneIceFilterTest(unittest.TestCase):
         self.assertEqual(sent, ["due-p:live-2026-10-20"])
 
 
+class RecollectOutsideLockTest(unittest.TestCase):
+    """H9：勾完 todo 后重采 gtasks（gog 可能慢 / 挂）期间，其他线程仍能拿到 svc 锁。"""
+
+    def test_recollect_does_not_hold_svc(self):
+        cfg = config.load()
+        cfg.worker_timeout = 3
+        svc = dibao.Service(cfg, push=False)
+        svc.todo_runner = FakeGog()
+        svc.todo_sleep = lambda s: None
+        seen = {}
+
+        def recollect():
+            got = []
+            t = threading.Thread(target=lambda: got.append(svc.svc.acquire(timeout=2) and (svc.svc.release() or True)))
+            t.start()
+            t.join()
+            seen["other_thread_got_svc"] = bool(got and got[0])
+        svc.recollect_gtasks = recollect
+        aid = "h9-" + uuid.uuid4().hex[:8]
+        write_remote_lines(action("T-h9", aid=aid))
+        lines = svc.process_todos()
+        self.assertEqual(lines[aid]["state"], "done")
+        self.assertTrue(seen.get("other_thread_got_svc"), "重采期间 svc 锁被占着")
+        self.assertEqual(ta.summarize(ta.read_records(dibao.TODO_ACTIONS))[1][aid]["state"], "done")
+        self.assertEqual(_env.sh("git", "-C", _env.DATA, "status", "--porcelain"), "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -241,11 +241,12 @@ class Service:
                     for line in lines.values():
                         ledger.append(TODO_ACTIONS, line)
                     self._commit(["todo-actions.jsonl"], f"todos: apply {len(lines)}")
-                if any(x["state"] == "done" for x in lines.values()):
-                    try:
-                        self.recollect_gtasks()
-                    except Exception:  # noqa: BLE001
-                        log.exception("勾完后重采 gtasks 失败")
+            if any(x["state"] == "done" for x in lines.values()):
+                try:                                         # 重采走 gog（最长约 2 分钟），不持 svc（H9）
+                    self.recollect_gtasks()
+                except Exception:  # noqa: BLE001
+                    log.exception("勾完后重采 gtasks 失败")
+            with self.svc:
                 self.rebuild()
             return lines
         finally:
