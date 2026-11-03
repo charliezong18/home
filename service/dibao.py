@@ -87,13 +87,26 @@ class Service:
             self.pusher.mark()
         return True
 
+    @staticmethod
+    def git_path(name):
+        """`git rev-parse --git-path`：普通仓是 .git/<name>；git worktree 下 .git 是文件，info/ 在主仓公共目录、
+        rebase-merge 在 .git/worktrees/<wt>/ 下（H4）。git 读不到返回 None。"""
+        r = git("rev-parse", "--git-path", name, check=False)
+        p = r.stdout.strip() if r.returncode == 0 else ""
+        if not p:
+            return None
+        return p if os.path.isabs(p) else os.path.join(DATA_DIR, p)
+
     def prepare_repo(self):
         """让 pull --rebase 在两边都追加 jsonl 末尾时不冲突（union），生成物冲突取本地（马上重算）。"""
-        info = os.path.join(DATA_DIR, ".git", "info")
-        if os.path.isdir(info):
-            with open(os.path.join(info, "attributes"), "w") as f:
-                f.write("*.jsonl merge=union\nhome.json merge=ours\nstatus.json merge=ours\n")
-            git("config", "merge.ours.driver", "true", check=False)
+        attrs = self.git_path("info/attributes")
+        if not attrs:
+            log.warning("prepare_repo：%s 不是 git 仓，跳过 merge 属性", DATA_DIR)
+            return
+        os.makedirs(os.path.dirname(attrs), exist_ok=True)
+        with open(attrs, "w") as f:
+            f.write("*.jsonl merge=union\nhome.json merge=ours\nstatus.json merge=ours\n")
+        git("config", "merge.ours.driver", "true", check=False)
 
     # ---------- 落卡 + 重算 ----------
     def rebuild(self):
@@ -412,8 +425,10 @@ class Service:
 
     def worktree_state(self):
         """(dirty, rebasing)；不取 data_lock，git 读不到时 dirty 为 None。"""
-        gitdir = os.path.join(DATA_DIR, ".git")
-        rebasing = any(os.path.isdir(os.path.join(gitdir, d)) for d in ("rebase-merge", "rebase-apply"))
+        try:
+            rebasing = any((p := self.git_path(d)) and os.path.isdir(p) for d in ("rebase-merge", "rebase-apply"))
+        except Exception:  # noqa: BLE001
+            rebasing = False
         try:
             r = git("--no-optional-locks", "status", "--porcelain", timeout=10, check=False)
             dirty = bool(r.stdout.strip()) if r.returncode == 0 else None
