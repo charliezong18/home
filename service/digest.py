@@ -22,7 +22,9 @@ MONEY_RE = re.compile(r"[$¥￥€£]\s?\d|\d[\d,.]*\s?(?:元|块|美元|美金|
                       r"|(?<![A-Za-z])(?:USD|RMB|CNY|HKD|EUR|usd|rmb|cny|hkd|eur)\s?\d"     # 货币在前：USD 300
                       r"|[零一二两三四五六七八九十百千万亿]+\s?(?:块|元|美元|美金|刀)"   # 中文数字：三千块
                       r"|\d{1,3}(?:,\d{3})+(?!\d)")                                 # 无单位千分位：1,200
-STALE_H = 3                      # home.json 生成时间超过这么久 = 数据过期，早晚报不下「空日」结论
+# home.json 生成时间超过这么久 = 数据过期，早晚报不下「空日」结论。健康时 generated 最多落后
+# build_home.HEARTBEAT_H(3h) + 一个采集周期(30min)，阈值必须留余量，否则 3–3.5h 窗口里误报（H8）。与网页 STALE_H 一致。
+STALE_H = 4
 CORE_SOURCES = ("menxia", "dashboard")
 STALE_FAILS = 3
 STALE = {"morning": "邸报数据过期，早报暂缺（{why}）", "evening": "邸报数据过期，晚报暂缺（{why}）"}
