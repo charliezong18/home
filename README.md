@@ -74,6 +74,7 @@ python3 collectors/life_ingest.py list --window 14        # 只读
 ## 服务 dibao（#187 A 期·核心）
 
 Mac mini 常驻的标准库 HTTP 服务，`127.0.0.1:8766`，**不暴露、不鉴权、不托管页面**（#192 Q10=B：客户端只连 GitHub）。本地 home-data 工作树是真源，dibao 是本机唯一写者（上线前必须先停 `ai-home-edits`，否则双写）。
+防跨站：带 `Origin` 头（或 `Sec-Fetch-Site` ≠ `none`）的请求一律 403，POST / PATCH 必须 `Content-Type: application/json`（否则 415）——浏览器里的网页因此碰不到它；`cli.py` / curl 加 `-H 'Content-Type: application/json'` 照常用。
 
 ```
 客户端（网页 / iOS）──(PAT, contents API)──► GitHub review:home-data ◄──┐ push（≤60 s 防抖）
@@ -101,7 +102,7 @@ Mac mini dibao :8766
 
 ```bash
 make install     # 建 ~/.config/dibao、~/Library/Logs/dibao，拷 plist，launchctl bootstrap，打 /health（由 Hermes 执行）
-make health / make uninstall / make test
+make health / make uninstall / make test   # test 含 node --test test/*.test.js（网页逻辑，需 Node ≥ 18）
 python3 service/cli.py health | edits --json '…' | readings-add --url URL --why 理由 | notes-pending | note-done --id ID --result 文本 | collect | digest morning|evening [--dry-run|--send]
 python3 service/dibao.py --no-push --once-sync   # 演练：配 AI_HOME_DATA=<临时 git 仓> DIBAO_PORT=<端口>，绝不指向真实 review-home-data
 ```
