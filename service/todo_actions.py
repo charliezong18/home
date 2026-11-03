@@ -36,7 +36,8 @@ TITLE_MAX = 200
 RETRIES = 3                                                 # 瞬时错误再试 3 次
 BACKOFF = 2                                                 # 2 s、4 s、8 s
 TRANSIENT_RE = re.compile(r"\b5\d\d\b|backend ?error|internal ?error|unavailable|timed? ?out|超时|起不来"
-                          r"|connection (?:reset|refused)|temporar", re.I)
+                          r"|connection (?:reset|refused)|temporar"
+                          r"|no such host|network is unreachable|no route to host", re.I)   # 断网 / DNS 失败
 
 
 def state_path():
@@ -74,8 +75,13 @@ def read_records(path):
         return []
 
 
+def local_lines(path=None):
+    """本机账本 → {id: 最后一条状态行}。"""
+    return {r["id"]: r for r in read_records(path or state_path())}
+
+
 def local_done(path=None):
-    return {r["id"] for r in read_records(path or state_path())}
+    return set(local_lines(path))
 
 
 def summarize(records, done_ids=()):

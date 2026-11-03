@@ -133,6 +133,8 @@ def failed_todos(records, now=None):
             ts = dt.datetime.fromisoformat(str(r.get("ts")).replace("Z", "+00:00"))
         except ValueError:
             continue
+        if ts.tzinfo is None:                               # 手改 / 写坏的行没带时区：按 UTC，别让整个 build 抛 TypeError
+            ts = ts.replace(tzinfo=dt.timezone.utc)
         if now - ts <= dt.timedelta(hours=FAILED_HOURS):
             out.append({"task_id": tid, "error": redact_email(str(r.get("error") or "失败"))[:FAILED_ERR_MAX]})
     return out

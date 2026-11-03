@@ -86,7 +86,7 @@ def open_tasks(raw):
     for t in raw:
         if not t.get("id") or t.get("status") == "completed" or t.get("completed") or t.get("deleted") or t.get("hidden"):
             continue
-        due = (t.get("due") or "")[:10]
+        due = str(t.get("due") or "")[:10]                 # 非字符串（坏输出）当无截止，不抛
         try:
             due = dt.date.fromisoformat(due).isoformat()
         except ValueError:
