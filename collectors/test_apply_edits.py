@@ -72,6 +72,19 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("KeyError", res["e:boom"]["error"])
         self.assertEqual(res["e:ok"]["state"], "applied")
 
+    def test_transient_oserror_reports_retry_not_failed(self):
+        real = apply_edits.apply_card
+        def drive_hiccup(path, e, today):
+            if e["id"] == "e:flaky":
+                raise PermissionError(1, "Operation not permitted", path)
+            return real(path, e, today)
+        with mock.patch.object(apply_edits, "apply_card", drive_hiccup):
+            res = self.run_worker([{"id": "e:flaky", "target": "p:demo", "fields": {"next": "a"}},
+                                   {"id": "e:ok", "target": "p:demo", "fields": {"next": "b"}}])
+        self.assertEqual(res["e:flaky"]["state"], "retry")      # 不是终态 failed
+        self.assertFalse(res["e:flaky"]["changed"])
+        self.assertEqual(res["e:ok"]["state"], "applied")
+
     def test_validate_rejects_bad_types(self):
         self.assertIn("note", apply_edits.validate({"target": "p:x", "note": ["a"]}))
         self.assertIn("target", apply_edits.validate({"target": 3}))

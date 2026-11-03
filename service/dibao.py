@@ -46,6 +46,7 @@ DEVICES = os.path.join(DATA_DIR, "devices.jsonl")
 TODO_ACTIONS = os.path.join(DATA_DIR, "todo-actions.jsonl")
 DUE_SCAN_AT = (7, 30)                    # 本地时间；晚于此启动则当天补扫一次（键里带日期，不会重复推）
 MAX_BODY = 64 * 1024
+EDIT_RETRY_MAX = 10                      # worker 报 retry（vault 暂时性 OSError）连续这么多轮仍失败才记 failed
 log = logging.getLogger("dibao")
 
 
@@ -62,6 +63,7 @@ class Service:
         self.sched = sched.Scheduler(self)
         self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
         self.due_done = None
+        self.edit_retries = {}                            # edit id → 连续 retry 次数（只在内存，重启清零 = 多给几次机会）
         digest.configure(cfg.digest)                      # 本机 config.toml [digest] 的额外受保护 label
         self.todo_runner = subprocess.run                 # gog 子进程入口；测试换成假 gog
         self.todo_sleep = time.sleep                      # gog 瞬时失败的退避等待；测试换成不睡
@@ -175,19 +177,29 @@ class Service:
             return None
         ts, lines = now_iso(), {}
         for x in results:
+            if x.get("state") == "retry":                # 暂时性错误：不写状态行，edit 保持 pending（H7）
+                n = self.edit_retries[x["id"]] = self.edit_retries.get(x["id"], 0) + 1
+                if n < EDIT_RETRY_MAX:
+                    log.warning("edit %s 暂时失败（第 %d 次），保持 pending：%s", x["id"], n, x.get("error", ""))
+                    continue
+                x = {**x, "state": "failed", "error": f"重试 {n} 次仍失败：{x.get('error', '')}"[:300]}
+            self.edit_retries.pop(x["id"], None)
             line = {"id": x["id"], "state": x["state"], "ts": ts}
             for k in ("summary", "error"):
                 if x.get(k):
                     line[k] = x[k]
             lines[x["id"]] = line
             log.info("edit %s → %s %s", x["id"], x["state"], x.get("summary") or x.get("error") or "")
-        with data_lock():
-            for line in lines.values():
-                ledger.append(EDITS, line)
-            self._commit(["edits.jsonl"], f"edits: apply {len(lines)}")
-        if any(x.get("changed") for x in results):
+        if lines:
+            with data_lock():
+                for line in lines.values():
+                    ledger.append(EDITS, line)
+                self._commit(["edits.jsonl"], f"edits: apply {len(lines)}")
+        changed = any(x.get("changed") for x in results)
+        if changed:
             apply.recollect(self.cfg.recollect_cmd, self.cfg.worker_timeout, log.warning)
-        self.rebuild()
+        if lines or changed:
+            self.rebuild()
         return lines
 
     def process_todos(self, wait=True):

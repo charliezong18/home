@@ -5,6 +5,8 @@
   pending → applied        字段/里程碑已落卡，没有附言
   pending → needs_hermes   字段部分已落卡（或没有字段改动），附言 note 留给 Hermes 派 Claude 处理
   pending → failed         校验不过（目标卡不存在、取值非法、里程碑文本对不上），整条不落盘
+  pending（不变）           读写卡片遇到 OSError（Drive 暂不可读等）：worker 报 state=retry，调用方不写状态行，
+                           下轮再试；dibao 连续 EDIT_RETRY_MAX 次仍失败才记 failed
   needs_hermes → done      Hermes 处理完附言后用 --mark-done 追加
 本脚本绝不调 claude。读写 vault 放在子进程里，30 秒硬超时；超时整轮跳过、不记状态，下轮再试。
 
@@ -233,8 +235,10 @@ def worker():
             changed, summary = apply_card(path, e, today)
             out.append({"id": eid, "state": "needs_hermes" if has_note else "applied",
                         "summary": summary, "changed": changed})
+        except OSError as ex:   # Drive File Provider 暂不可读、写失败等暂时性错误：不是终态，留 pending 下轮再试（H7）
+            out.append({"id": eid, "state": "retry", "error": str(ex)[:300], "changed": False})
         except Exception as ex:  # noqa: BLE001
-            msg = str(ex) if isinstance(ex, (ValueError, OSError)) else f"{type(ex).__name__}: {ex}"
+            msg = str(ex) if isinstance(ex, ValueError) else f"{type(ex).__name__}: {ex}"
             out.append({"id": eid, "state": "failed", "error": msg[:300], "changed": False})
     json.dump(out, sys.stdout, ensure_ascii=False)
 
@@ -262,6 +266,9 @@ def cmd_apply():
         ts = now_iso()
         lines = []
         for x in results:
+            if x["state"] == "retry":                        # 暂时性错误：不记状态，留 pending
+                log(f"edits: {x['id']} 暂时失败，留到下轮：{x.get('error', '')}")
+                continue
             line = {"id": x["id"], "state": x["state"], "ts": ts}
             if x.get("summary"):
                 line["summary"] = x["summary"]
