@@ -46,7 +46,8 @@ DEVICES = os.path.join(DATA_DIR, "devices.jsonl")
 TODO_ACTIONS = os.path.join(DATA_DIR, "todo-actions.jsonl")
 DUE_SCAN_AT = (7, 30)                    # 本地时间；晚于此启动则当天补扫一次（键里带日期，不会重复推）
 MAX_BODY = 64 * 1024
-EDIT_RETRY_MAX = 10                      # worker 报 retry（vault 暂时性 OSError）连续这么多轮仍失败才记 failed
+EDIT_RETRY_SECS = 2 * 3600               # worker 报 retry（vault 暂时性 OSError）从首次失败起持续这么久仍失败才记 failed（L1：按时间不按轮）
+MERGE_ATTRS = ("*.jsonl merge=union", "home.json merge=ours", "status.json merge=ours")
 log = logging.getLogger("dibao")
 
 
@@ -63,7 +64,8 @@ class Service:
         self.sched = sched.Scheduler(self)
         self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
         self.due_done = None
-        self.edit_retries = {}                            # edit id → 连续 retry 次数（只在内存，重启清零 = 多给几次机会）
+        self.edit_retries = {}                            # edit id → (首次 retry 时刻, 次数)（只在内存，重启清零 = 多给几次机会）
+        self.clock = time.time                            # retry 计时用；测试可换
         digest.configure(cfg.digest)                      # 本机 config.toml [digest] 的额外受保护 label
         self.todo_runner = subprocess.run                 # gog 子进程入口；测试换成假 gog
         self.todo_sleep = time.sleep                      # gog 瞬时失败的退避等待；测试换成不睡
@@ -104,8 +106,19 @@ class Service:
             log.warning("prepare_repo：%s 不是 git 仓，跳过 merge 属性", DATA_DIR)
             return
         os.makedirs(os.path.dirname(attrs), exist_ok=True)
-        with open(attrs, "w") as f:
-            f.write("*.jsonl merge=union\nhome.json merge=ours\nstatus.json merge=ours\n")
+        # worktree 部署下这是主仓公共的 info/attributes：只追加缺的行，不覆盖已有内容；重复调用不重复写（M1）
+        try:
+            with open(attrs) as f:
+                old = f.read()
+        except FileNotFoundError:
+            old = ""
+        have = {line.strip() for line in old.splitlines()}
+        missing = [line for line in MERGE_ATTRS if line not in have]
+        if missing:
+            with open(attrs, "a") as f:
+                if old and not old.endswith("\n"):
+                    f.write("\n")
+                f.write("".join(line + "\n" for line in missing))
         git("config", "merge.ours.driver", "true", check=False)
 
     # ---------- 落卡 + 重算 ----------
@@ -191,11 +204,15 @@ class Service:
         ts, lines = now_iso(), {}
         for x in results:
             if x.get("state") == "retry":                # 暂时性错误：不写状态行，edit 保持 pending（H7）
-                n = self.edit_retries[x["id"]] = self.edit_retries.get(x["id"], 0) + 1
-                if n < EDIT_RETRY_MAX:
+                now = self.clock()
+                first, n = self.edit_retries.get(x["id"], (now, 0))
+                n += 1
+                self.edit_retries[x["id"]] = (first, n)
+                if now - first < EDIT_RETRY_SECS:
                     log.warning("edit %s 暂时失败（第 %d 次），保持 pending：%s", x["id"], n, x.get("error", ""))
                     continue
-                x = {**x, "state": "failed", "error": f"重试 {n} 次仍失败：{x.get('error', '')}"[:300]}
+                mins = int((now - first) // 60)
+                x = {**x, "state": "failed", "error": f"重试 {n} 次（{mins} 分钟）仍失败：{x.get('error', '')}"[:300]}
             self.edit_retries.pop(x["id"], None)
             line = {"id": x["id"], "state": x["state"], "ts": ts}
             for k in ("summary", "error"):

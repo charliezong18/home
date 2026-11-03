@@ -56,6 +56,22 @@ class WorktreeTest(unittest.TestCase):
         self.assertIn("edits.jsonl: merge: union", attr)
         self.assertIn("home.json: merge: ours", attr)
 
+    def test_prepare_repo_keeps_existing_attributes_and_is_idempotent(self):
+        attrs = self.svc.git_path("info/attributes")
+        os.makedirs(os.path.dirname(attrs), exist_ok=True)
+        with open(attrs, "w") as f:                                            # 主仓自己的 attributes，末尾无换行
+            f.write("*.md diff=markdown\nhome.json merge=ours")
+        self.svc.prepare_repo()
+        self.svc.prepare_repo()
+        with open(attrs) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(lines[0], "*.md diff=markdown")                      # 原有行不被覆盖
+        for want in dibao.MERGE_ATTRS:
+            self.assertEqual(lines.count(want), 1, want)                       # 缺的补上、已有的不重复
+        self.assertEqual(len(lines), 1 + len(dibao.MERGE_ATTRS))
+        attr = sh("git", "-C", self.main, "check-attr", "diff", "--", "x.md")
+        self.assertIn("x.md: diff: markdown", attr)
+
     def test_concurrent_append_rebases_cleanly(self):
         self.svc.prepare_repo()
         sh("git", "clone", "-q", "-b", "home-data", self.remote, self.other)    # 「网页」那边先追加并推

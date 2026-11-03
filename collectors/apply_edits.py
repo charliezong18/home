@@ -6,7 +6,7 @@
   pending → needs_hermes   字段部分已落卡（或没有字段改动），附言 note 留给 Hermes 派 Claude 处理
   pending → failed         校验不过（目标卡不存在、取值非法、里程碑文本对不上），整条不落盘
   pending（不变）           读写卡片遇到 OSError（Drive 暂不可读等）：worker 报 state=retry，调用方不写状态行，
-                           下轮再试；dibao 连续 EDIT_RETRY_MAX 次仍失败才记 failed
+                           下轮再试；dibao 从首次失败起持续 EDIT_RETRY_SECS（2 小时）仍失败才记 failed
   needs_hermes → done      Hermes 处理完附言后用 --mark-done 追加
 本脚本绝不调 claude。读写 vault 放在子进程里，30 秒硬超时；超时整轮跳过、不记状态，下轮再试。
 

@@ -1,4 +1,4 @@
-"""H7：worker 报 retry（vault 暂时性 OSError）时 dibao 不写状态行，edit 保持 pending；连续 EDIT_RETRY_MAX 次才记 failed。"""
+"""H7：worker 报 retry（vault 暂时性 OSError）时 dibao 不写状态行，edit 保持 pending；从首次失败起满 EDIT_RETRY_SECS 才记 failed。"""
 import os
 import sys
 import unittest
@@ -52,12 +52,18 @@ class EditRetryTest(unittest.TestCase):
         self.assertEqual(self.state("e:retry1"), "applied")
         self.assertNotIn("e:retry1", self.svc.edit_retries)
 
-    def test_gives_up_after_retry_cap(self):
-        self.svc.post_edit({"id": "e:retry2", "target": "p:flaky", "fields": {"next": "y"}})   # 第 1 次
-        for _ in range(dibao.EDIT_RETRY_MAX - 2):
+    def test_gives_up_after_retry_window(self):
+        t = [1_000_000.0]
+        self.svc.clock = lambda: t[0]
+        self.svc.post_edit({"id": "e:retry2", "target": "p:flaky", "fields": {"next": "y"}})   # 第 1 次，计时起点
+        for _ in range(30):                                              # 轮数再多，窗口内也不放弃（L1：按时间不按轮）
+            t[0] += 60
             self.assertEqual(self.svc.process_pending(), {})
         self.assertEqual(self.state("e:retry2"), "pending")
-        lines = self.svc.process_pending()                               # 第 EDIT_RETRY_MAX 次
+        t[0] = 1_000_000.0 + dibao.EDIT_RETRY_SECS - 1
+        self.assertEqual(self.svc.process_pending(), {})                 # 差 1 秒仍 pending
+        t[0] += 1
+        lines = self.svc.process_pending()                               # 满 EDIT_RETRY_SECS
         self.assertEqual(lines["e:retry2"]["state"], "failed")
         self.assertIn("重试", lines["e:retry2"]["error"])
         self.assertEqual(self.state("e:retry2"), "failed")
