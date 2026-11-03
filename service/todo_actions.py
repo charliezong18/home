@@ -98,7 +98,10 @@ def summarize(records, done_ids=()):
 def _gog(runner, args, timeout=CALL_TIMEOUT):
     """→ (rc, stdout, 错误文本)；超时 / 起不来 rc=None。"""
     try:
-        r = runner([GOG, "tasks", *args, "--no-input", "--color=never"], capture_output=True, text=True, timeout=timeout)
+        # errors="replace"：gog 跑完后 stdout/stderr 不是 UTF-8 也不能抛——此时 Google Tasks 里可能已经改了，
+        # 抛出去会被标成粘住的 failed（实际却成功了）。
+        r = runner([GOG, "tasks", *args, "--no-input", "--color=never"], capture_output=True, text=True,
+                   errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, "", f"gog 超时 {timeout}s"
     except OSError as e:

@@ -132,6 +132,29 @@ class QueueTest(unittest.TestCase):
         self.assertIn("UnicodeDecodeError", f["qx-2"]["error"])
         self.assertEqual(g.mutations(), [("done", "QX1"), ("done", "QX3")])
 
+    def test_non_utf8_output_after_gog_ran_is_done(self):
+        """真实场景：gog 已经执行（Google Tasks 里已勾掉），之后解码 stdout/stderr 时才遇到非 UTF-8。
+        假 gog 照 subprocess.run(text=True) 的行为：没传 errors="replace" 就在变更之后抛 UnicodeDecodeError。
+        不能被标成粘住的 failed。"""
+        class BadBytes(FakeGog):
+            def __call__(self, cmd, **kw):
+                r = super().__call__(cmd, **kw)                        # 先真的执行（变更已发生）
+                if cmd[4] != "QU1":
+                    return r
+                raw = b"\xff\xfe ok"
+                if kw.get("text") and kw.get("errors") != "replace":
+                    raise UnicodeDecodeError("utf-8", raw, 0, 1, "invalid start byte")
+                return subprocess.CompletedProcess(cmd, r.returncode, raw.decode("utf-8", "replace"),
+                                                   raw.decode("utf-8", "replace"))
+        g = BadBytes()
+        svc = _svc(g)
+        write_remote_lines(action("QU1", aid="qu-1"))
+        svc.process_todos()
+        f = states()
+        self.assertEqual(f["qu-1"]["state"], "done")
+        self.assertEqual(g.mutations(), [("done", "QU1")])
+        self.assertEqual(g.status["QU1"], "completed")
+
     def test_pending_counted_in_health(self):
         svc = _svc(FakeGog())
         base = svc.health()["pending_todos"]
