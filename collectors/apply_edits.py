@@ -89,6 +89,12 @@ def yaml_scalar(v):
 
 
 def validate(edit):
+    if not isinstance(edit, dict):
+        return "编辑不是对象"
+    if not isinstance(edit.get("target"), str) or not edit["target"].strip():
+        return "target 必须是非空字符串"
+    if edit.get("note") is not None and not isinstance(edit["note"], str):
+        return "note 必须是字符串"
     fields = edit.get("fields") or {}
     if not isinstance(fields, dict):
         return "fields 不是对象"
@@ -213,19 +219,23 @@ def worker():
     today = today_local()
     out = []
     for e in edits:
-        has_note = bool((e.get("note") or "").strip())
-        try:
+        eid = e.get("id") if isinstance(e, dict) else None
+        if not isinstance(eid, str) or not eid:
+            continue                                   # 没有 id 无从记状态行；ledger 读出来的都带 id
+        try:   # 每条单独兜底：一条畸形 edit 只把自己标 failed，不让整个 worker 崩掉、所有 edit 卡死（H3）
             err = validate(e)
             if err:
                 raise ValueError(err)
-            path = by_id.get(e.get("target"))
+            has_note = bool((e.get("note") or "").strip())
+            path = by_id.get(e["target"])
             if not path:
-                raise ValueError(f"找不到项目卡 {e.get('target')}")
+                raise ValueError(f"找不到项目卡 {e['target']}")
             changed, summary = apply_card(path, e, today)
-            out.append({"id": e["id"], "state": "needs_hermes" if has_note else "applied",
+            out.append({"id": eid, "state": "needs_hermes" if has_note else "applied",
                         "summary": summary, "changed": changed})
-        except (ValueError, OSError) as ex:
-            out.append({"id": e["id"], "state": "failed", "error": str(ex)[:300], "changed": False})
+        except Exception as ex:  # noqa: BLE001
+            msg = str(ex) if isinstance(ex, (ValueError, OSError)) else f"{type(ex).__name__}: {ex}"
+            out.append({"id": eid, "state": "failed", "error": msg[:300], "changed": False})
     json.dump(out, sys.stdout, ensure_ascii=False)
 
 
