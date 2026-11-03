@@ -624,6 +624,8 @@ function fillProject(p) {
 }
 
 // ---- 编辑 → 保存 → 触发更新 ----
+let editInit = {};   // 打开编辑时表单的初值：collectEdit 只收用户真改过的输入框（H6：非标准 deadline 显示为空，不能当成「清空」）
+const readForm = () => ({ next: $('pe-next').value.replace(/\s+/g, ' ').trim(), status: $('pe-status').value, tier: $('pe-tier').value, deadline: $('pe-deadline').value });
 function setEditing(on) {
   $('proj-dialog').classList.toggle('editing', on);
   $('pd-edit').hidden = !on;
@@ -646,6 +648,7 @@ function setEditing(on) {
     cb.checked = !!m.done;
     return h('label', { class: 'pe-ck' }, cb, h('span', {}, m.text));
   }));
+  editInit = readForm();
   $('pe-note').value = '';
   $('pe-err').textContent = '';
   $('pe-save').disabled = false;
@@ -655,8 +658,8 @@ function setEditing(on) {
 // 只收改动过的字段 / 里程碑
 function collectEdit(p) {
   const fields = {};
-  const cur = { next: $('pe-next').value.replace(/\s+/g, ' ').trim(), status: $('pe-status').value, tier: $('pe-tier').value, deadline: $('pe-deadline').value };
-  for (const [k, v] of Object.entries(cur)) if (v !== (p[k] || '')) fields[k] = v;
+  const cur = readForm();
+  for (const [k, v] of Object.entries(cur)) if (v !== editInit[k] && v !== (p[k] || '')) fields[k] = v;
   if ('status' in fields && !fields.status) delete fields.status;   // 「—」不算改：status / tier 不支持清空
   if ('tier' in fields && !fields.tier) delete fields.tier;
   const ms = (p.sections || {}).milestones || [];
