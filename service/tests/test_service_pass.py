@@ -272,6 +272,7 @@ class EditsAndHealthTest(unittest.TestCase):
     def raw(self, path, body, length=None):
         c = http.client.HTTPConnection("127.0.0.1", self.s.port, timeout=10)
         c.putrequest("POST", path)
+        c.putheader("Content-Type", "application/json")  # dibao 对非 JSON 写请求返回 415（H2）
         c.putheader("Content-Length", str(length if length is not None else len(body)))
         c.endheaders()
         if body:
