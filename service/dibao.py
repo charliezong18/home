@@ -46,6 +46,8 @@ DEVICES = os.path.join(DATA_DIR, "devices.jsonl")
 TODO_ACTIONS = os.path.join(DATA_DIR, "todo-actions.jsonl")
 DUE_SCAN_AT = (7, 30)                    # 本地时间；晚于此启动则当天补扫一次（键里带日期，不会重复推）
 MAX_BODY = 64 * 1024
+EDIT_RETRY_SECS = 2 * 3600               # worker 报 retry（vault 暂时性 OSError）从首次失败起持续这么久仍失败才记 failed（L1：按时间不按轮）
+MERGE_ATTRS = ("*.jsonl merge=union", "home.json merge=ours", "status.json merge=ours")
 log = logging.getLogger("dibao")
 
 
@@ -62,6 +64,8 @@ class Service:
         self.sched = sched.Scheduler(self)
         self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
         self.due_done = None
+        self.edit_retries = {}                            # edit id → (首次 retry 时刻, 次数)（只在内存，重启清零 = 多给几次机会）
+        self.clock = time.time                            # retry 计时用；测试可换
         digest.configure(cfg.digest)                      # 本机 config.toml [digest] 的额外受保护 label
         self.todo_runner = subprocess.run                 # gog 子进程入口；测试换成假 gog
         self.todo_sleep = time.sleep                      # gog 瞬时失败的退避等待；测试换成不睡
@@ -85,13 +89,37 @@ class Service:
             self.pusher.mark()
         return True
 
+    @staticmethod
+    def git_path(name):
+        """`git rev-parse --git-path`：普通仓是 .git/<name>；git worktree 下 .git 是文件，info/ 在主仓公共目录、
+        rebase-merge 在 .git/worktrees/<wt>/ 下（H4）。git 读不到返回 None。"""
+        r = git("rev-parse", "--git-path", name, check=False)
+        p = r.stdout.strip() if r.returncode == 0 else ""
+        if not p:
+            return None
+        return p if os.path.isabs(p) else os.path.join(DATA_DIR, p)
+
     def prepare_repo(self):
         """让 pull --rebase 在两边都追加 jsonl 末尾时不冲突（union），生成物冲突取本地（马上重算）。"""
-        info = os.path.join(DATA_DIR, ".git", "info")
-        if os.path.isdir(info):
-            with open(os.path.join(info, "attributes"), "w") as f:
-                f.write("*.jsonl merge=union\nhome.json merge=ours\nstatus.json merge=ours\n")
-            git("config", "merge.ours.driver", "true", check=False)
+        attrs = self.git_path("info/attributes")
+        if not attrs:
+            log.warning("prepare_repo：%s 不是 git 仓，跳过 merge 属性", DATA_DIR)
+            return
+        os.makedirs(os.path.dirname(attrs), exist_ok=True)
+        # worktree 部署下这是主仓公共的 info/attributes：只追加缺的行，不覆盖已有内容；重复调用不重复写（M1）
+        try:
+            with open(attrs) as f:
+                old = f.read()
+        except FileNotFoundError:
+            old = ""
+        have = {line.strip() for line in old.splitlines()}
+        missing = [line for line in MERGE_ATTRS if line not in have]
+        if missing:
+            with open(attrs, "a") as f:
+                if old and not old.endswith("\n"):
+                    f.write("\n")
+                f.write("".join(line + "\n" for line in missing))
+        git("config", "merge.ours.driver", "true", check=False)
 
     # ---------- 落卡 + 重算 ----------
     def rebuild(self):
@@ -175,19 +203,33 @@ class Service:
             return None
         ts, lines = now_iso(), {}
         for x in results:
+            if x.get("state") == "retry":                # 暂时性错误：不写状态行，edit 保持 pending（H7）
+                now = self.clock()
+                first, n = self.edit_retries.get(x["id"], (now, 0))
+                n += 1
+                self.edit_retries[x["id"]] = (first, n)
+                if now - first < EDIT_RETRY_SECS:
+                    log.warning("edit %s 暂时失败（第 %d 次），保持 pending：%s", x["id"], n, x.get("error", ""))
+                    continue
+                mins = int((now - first) // 60)
+                x = {**x, "state": "failed", "error": f"重试 {n} 次（{mins} 分钟）仍失败：{x.get('error', '')}"[:300]}
+            self.edit_retries.pop(x["id"], None)
             line = {"id": x["id"], "state": x["state"], "ts": ts}
             for k in ("summary", "error"):
                 if x.get(k):
                     line[k] = x[k]
             lines[x["id"]] = line
             log.info("edit %s → %s %s", x["id"], x["state"], x.get("summary") or x.get("error") or "")
-        with data_lock():
-            for line in lines.values():
-                ledger.append(EDITS, line)
-            self._commit(["edits.jsonl"], f"edits: apply {len(lines)}")
-        if any(x.get("changed") for x in results):
+        if lines:
+            with data_lock():
+                for line in lines.values():
+                    ledger.append(EDITS, line)
+                self._commit(["edits.jsonl"], f"edits: apply {len(lines)}")
+        changed = any(x.get("changed") for x in results)
+        if changed:
             apply.recollect(self.cfg.recollect_cmd, self.cfg.worker_timeout, log.warning)
-        self.rebuild()
+        if lines or changed:
+            self.rebuild()
         return lines
 
     def process_todos(self, wait=True):
@@ -216,11 +258,12 @@ class Service:
                     for line in lines.values():
                         ledger.append(TODO_ACTIONS, line)
                     self._commit(["todo-actions.jsonl"], f"todos: apply {len(lines)}")
-                if any(x["state"] == "done" for x in lines.values()):
-                    try:
-                        self.recollect_gtasks()
-                    except Exception:  # noqa: BLE001
-                        log.exception("勾完后重采 gtasks 失败")
+            if any(x["state"] == "done" for x in lines.values()):
+                try:                                         # 重采走 gog（最长约 2 分钟），不持 svc（H9）
+                    self.recollect_gtasks()
+                except Exception:  # noqa: BLE001
+                    log.exception("勾完后重采 gtasks 失败")
+            with self.svc:
                 self.rebuild()
             return lines
         finally:
@@ -400,8 +443,10 @@ class Service:
 
     def worktree_state(self):
         """(dirty, rebasing)；不取 data_lock，git 读不到时 dirty 为 None。"""
-        gitdir = os.path.join(DATA_DIR, ".git")
-        rebasing = any(os.path.isdir(os.path.join(gitdir, d)) for d in ("rebase-merge", "rebase-apply"))
+        try:
+            rebasing = any((p := self.git_path(d)) and os.path.isdir(p) for d in ("rebase-merge", "rebase-apply"))
+        except Exception:  # noqa: BLE001
+            rebasing = False
         try:
             r = git("--no-optional-locks", "status", "--porcelain", timeout=10, check=False)
             dirty = bool(r.stdout.strip()) if r.returncode == 0 else None
@@ -484,6 +529,14 @@ def make_handler(svc):
             host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
             if host not in ("127.0.0.1", "localhost", "[::1]"):
                 return self._send(421, {"error": "只服务 127.0.0.1"})
+            # 防跨站：浏览器发的请求都带 Origin（或 Sec-Fetch-Site ≠ none）；本服务只给本机 CLI / 脚本用，一律拒。
+            # text/plain 的跨站 POST 不触发预检，所以写接口还必须是 application/json（浏览器跨站发它要预检，我们不回 CORS）。
+            if self.headers.get("Origin") is not None or (self.headers.get("Sec-Fetch-Site") or "none") != "none":
+                return self._send(403, {"error": "不接受浏览器跨站请求"})
+            if method in ("POST", "PATCH"):
+                ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                if ctype != "application/json":
+                    return self._send(415, {"error": "Content-Type 必须是 application/json"})
             path = self.path.split("?", 1)[0]
             try:
                 if method == "GET" and path == "/health":

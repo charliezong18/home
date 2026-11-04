@@ -10,7 +10,8 @@ DEFAULT_RECOLLECT = [sys.executable, os.path.join(COLLECTORS, "collect_dashboard
 
 
 def run_worker(cmd, edits, timeout, log=print):
-    """stdin 喂 pending 编辑数组，返回 [{id,state,summary|error,changed}]；超时 / 异常返回 None（不记状态，下轮再试）。"""
+    """stdin 喂 pending 编辑数组，返回 [{id,state,summary|error,changed}]；超时 / 异常返回 None（不记状态，下轮再试）。
+    state=retry 表示该条遇到暂时性错误（vault OSError），调用方不写状态行。"""
     try:
         r = subprocess.run(cmd, input=json.dumps(edits, ensure_ascii=False),
                            capture_output=True, text=True, timeout=timeout)

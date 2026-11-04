@@ -110,13 +110,16 @@ def validate(e):
             **({"private": e["private"]} if isinstance(e.get("private"), bool) else {})}
 
 
-def append(entries, no_git, msg):
-    """去重后追加；返回 (写入数, 跳过数)。"""
+def append(entries, no_git, msg, inherit_status=()):
+    """去重后追加；返回 (写入数, 跳过数)。inherit_status：调用方没显式给 status 的 id——已入账的沿用旧 status，
+    cron 每天重报同一事件不会把 done 降回 open（H5）。"""
     def go():
         cur = merged()
         new, skipped = [], 0
         for e in entries:
             old = cur.get(e["id"])
+            if old and e["id"] in inherit_status:
+                e = {**e, "status": old.get("status", "open")}
             if old and all(old.get(k) == e[k] for k in FIELDS if k in e):
                 skipped += 1
                 continue
@@ -148,10 +151,12 @@ def cmd_add(a):
             if not isinstance(raw, dict):
                 raise ValueError("--event-id 只能配单个对象；数组请在每个对象里写 event_id 字段")
             raw = {**raw, "event_id": a.event_id}
-        entries = [validate(e) for e in (raw if isinstance(raw, list) else [raw])]
+        raws = raw if isinstance(raw, list) else [raw]
+        entries = [validate(e) for e in raws]
     except ValueError as ex:
         die(f"life: 拒绝写入：{ex}", 2)
-    n, skipped = append(entries, a.no_git, "life: +")
+    implicit = {e["id"] for e, r in zip(entries, raws) if "status" not in r}
+    n, skipped = append(entries, a.no_git, "life: +", inherit_status=implicit)
     print(f"life: +{n} skipped={skipped}")
 
 

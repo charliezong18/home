@@ -16,7 +16,8 @@ import ledger  # noqa: E402
 
 def req(port, method, path, body=None, headers=None):
     data = json.dumps(body).encode() if body is not None else None
-    r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method, headers=headers or {})
+    hdrs = {"Content-Type": "application/json"} if method in ("POST", "PATCH") else {}   # dibao 只收 JSON（H2）
+    r = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method, headers={**hdrs, **(headers or {})})
     try:
         with urllib.request.urlopen(r, timeout=20) as resp:
             return resp.status, json.loads(resp.read() or b"null"), resp.headers

@@ -131,7 +131,7 @@ class Notifier:
 
     def scan_due(self, home, today):
         """每天 07:30 后跑一次：projects[].deadline 与 due[].date 等于今天的项。私密项（金额 / private: true）不露标题。"""
-        items = [(p.get("id"), p, p.get("deadline")) for p in home.get("projects") or []]
+        items = [(p.get("id"), p, p.get("deadline")) for p in home.get("projects") or [] if digest.project_live(p)]
         items += [(d.get("id"), d, d.get("date")) for d in home.get("due") or []]
         return [self.push(f"due-{i}-{today}", "邸报", f"今天截止：{PRIVATE if digest.item_private(it) else it.get('title')}",
                           home_url(i))

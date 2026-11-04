@@ -65,6 +65,21 @@ class LifeIngestTest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.run_cli("done", "--id", "d:cal-nope", "--no-git")
 
+    def test_cron_readd_does_not_reopen_done(self):
+        """H5：cron 每天重报同一事件（不带 status）不得把已 done 的条目改回 open；显式 status=open 仍可重开。"""
+        self.run_cli("add", "--json", json.dumps(entry()), "--no-git")
+        self.run_cli("done", "--id", "d:cal-test0001", "--no-git")
+        n = len(self.rows())
+        self.run_cli("add", "--json", json.dumps([entry(), entry(id="d:cal-test0002")]), "--no-git")
+        self.assertEqual(li.merged()["d:cal-test0001"]["status"], "done")
+        self.assertEqual(len(self.rows()), n + 1)                    # 只多了新条目那一行
+        self.assertNotIn("d:cal-test0001", [d["id"] for d in li.load_life()[0]])
+        self.run_cli("add", "--json", json.dumps(entry(note="改到 15:00")), "--no-git")   # 内容变了：更新但仍 done
+        self.assertEqual((li.merged()["d:cal-test0001"]["note"], li.merged()["d:cal-test0001"]["status"]),
+                         ("改到 15:00", "done"))
+        self.run_cli("add", "--json", json.dumps(entry(note="改到 15:00", status="open")), "--no-git")
+        self.assertEqual(li.merged()["d:cal-test0001"]["status"], "open")
+
     def test_due_items_includes_life(self):
         self.run_cli("add", "--json", json.dumps(entry()), "--no-git")
         items, _ = li.load_life()
