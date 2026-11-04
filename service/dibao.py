@@ -49,6 +49,17 @@ MAX_BODY = 64 * 1024
 EDIT_RETRY_SECS = 2 * 3600               # worker 报 retry（vault 暂时性 OSError）从首次失败起持续这么久仍失败才记 failed（L1：按时间不按轮）
 MERGE_ATTRS = ("*.jsonl merge=union", "home.json merge=ours", "status.json merge=ours")
 log = logging.getLogger("dibao")
+CONFLICT_RE = re.compile(r"^\+(<{7}|={7}|>{7})(?:\s|$)", re.M)
+
+
+class GitGuardError(RuntimeError):
+    """home-data 处于不安全状态（rebase 中 / detached / 冲突标记），拒绝提交或推送。"""
+
+
+def conflict_markers(diff_text):
+    """`git diff --cached -U0` 里新增行行首的冲突标记；返回首个命中，没有返回 None。"""
+    m = CONFLICT_RE.search(diff_text or "")
+    return m.group(1) if m else None
 
 
 class Service:
@@ -60,6 +71,8 @@ class Service:
         self.last_sync_down = self.last_push = None
         self.last_sync_ok = self.last_sync_error = None    # 最近一轮 sync 的成败（None = 还没跑过）
         self.last_push_ok = self.last_push_error = None
+        self.guard_error = None                           # 最近一次被 git 防护拒绝的原因（成功提交后清空）
+        self.alerted = set()                              # 已告警且尚未恢复的 git 异常类别（防重复刷）
         self.pusher = sched.Pusher(self.do_push, cfg.push_debounce_secs)
         self.sched = sched.Scheduler(self)
         self.notifier = events.Notifier(apns.Apns(cfg.apns), DEVICES, on_deactivate=self._deactivate)
@@ -80,14 +93,47 @@ class Service:
         return git("rev-parse", "HEAD", check=False).stdout.strip()
 
     def _commit(self, paths, message):
-        """调用方已持 data_lock（build_home.main 自带；本服务其余路径显式持）。"""
+        """调用方已持 data_lock（build_home.main 自带；本服务其余路径显式持）。
+        防护（10-31 事故）：rebase 中 / detached HEAD 不提交；暂存内容带冲突标记不提交——都抛 GitGuardError 并告警。"""
+        bad = self.repo_unsafe()
+        if bad:
+            self._guard_fail("commit-state", f"{bad}，拒绝提交：{message[:60]}")
         git("add", "--", *paths)
         if git("diff", "--cached", "--quiet", check=False).returncode == 0:
             return False
+        hit = conflict_markers(git("diff", "--cached", "-U0", "--no-color", check=False).stdout)
+        if hit:
+            self._guard_fail("commit-markers", f"暂存内容含冲突标记（{hit}），拒绝提交：{message[:60]}")
         git("commit", "--quiet", "-m", message)
+        self.guard_error = None
+        self.alerted.difference_update({"commit-state", "commit-markers"})
         if self.push:
             self.pusher.mark()
         return True
+
+    def repo_unsafe(self):
+        """处于 rebase 中或 detached HEAD 时返回原因字符串，否则 None。"""
+        if any((p := self.git_path(d)) and os.path.isdir(p) for d in ("rebase-merge", "rebase-apply")):
+            return "home-data 处于 rebase 中"
+        if git("symbolic-ref", "-q", "HEAD", check=False).returncode != 0:
+            return "home-data 处于 detached HEAD"
+        return None
+
+    def _guard_fail(self, kind, msg):
+        self.guard_error = msg[:200]
+        self.alert(kind, msg)
+        raise GitGuardError(msg)
+
+    def alert(self, kind, msg):
+        """git 异常告警：同一类在恢复前只推一次（内存标记 + 按天去重键，重启后当天也不重复）。推送正文不带 git 输出。"""
+        log.error("git 防护[%s]：%s", kind, msg)
+        if kind in self.alerted:
+            return
+        self.alerted.add(kind)
+        key = f"git-{kind}-{time.strftime('%Y-%m-%d')}"
+        body = {"sync": "pull --rebase 冲突，已 abort，需人工处理", "commit-state": "仓库处于 rebase/detached，已拒绝提交",
+                "commit-markers": "暂存内容含冲突标记，已拒绝提交"}.get(kind, kind)
+        self.fire(lambda: self.notifier.push(key, "邸报 home-data 同步异常", body, "menxia://home"))
 
     @staticmethod
     def git_path(name):
@@ -300,6 +346,11 @@ class Service:
     def sync_cycle(self):
         with self.svc:
             with data_lock():
+                bad = self.repo_unsafe()
+                if bad:                                      # 不在分支上拉 / 提交：保持现场等人工
+                    self.last_sync_ok, self.last_sync_error = False, f"{bad}，本轮不拉"
+                    self.alert("sync", self.last_sync_error)
+                    return
                 if git("status", "--porcelain").stdout.strip():
                     log.error("home-data 工作树不干净，本轮不拉")
                     self.last_sync_ok, self.last_sync_error = False, "home-data 工作树不干净，本轮不拉"
@@ -308,9 +359,15 @@ class Service:
                 try:
                     sync_down()
                     self.last_sync_ok, self.last_sync_error = True, None
+                    self.alerted.discard("sync")
                 except Exception as e:  # noqa: BLE001 — 断网不拖垮循环
                     log.warning("sync_down 失败：%s", str(e)[:200])
                     self.last_sync_ok, self.last_sync_error = False, str(e)[:200]
+                    if self.repo_unsafe():                   # pull --rebase 停在冲突里：abort 回原分支，绝不在 detached 上继续
+                        r = git("rebase", "--abort", check=False)
+                        state = "已 rebase --abort" if r.returncode == 0 else f"rebase --abort 失败：{r.stderr.strip()[:80]}"
+                        self.last_sync_error = f"pull --rebase 冲突，{state}"
+                        self.alert("sync", self.last_sync_error)
                 after = self._head()
             self.last_sync_down = now_iso()
             done = self.process_pending()
@@ -326,6 +383,11 @@ class Service:
 
     def do_push(self):
         with data_lock():
+            bad = self.repo_unsafe()
+            if bad:                                          # detached/rebase 中的 HEAD 绝不推到 origin（10-31 冲突标记就是这么上去的）
+                self.last_push_ok, self.last_push_error = False, f"{bad}，拒绝推送"
+                log.error("push 拒绝：%s", bad)
+                return False
             r = git("push", "--quiet", "origin", f"HEAD:{BRANCH}", timeout=90, check=False)
         if r.returncode == 0:
             self.last_push = now_iso()
@@ -470,10 +532,12 @@ class Service:
         except Exception:  # noqa: BLE001
             vault_ok = False
         dirty, rebasing = self.worktree_state()
-        ok = self.last_sync_ok is not False and self.last_push_ok is not False and dirty is False and not rebasing
+        ok = (self.last_sync_ok is not False and self.last_push_ok is not False and dirty is False and not rebasing
+              and not self.guard_error)
         return {"ok": ok, "uptime_s": int(time.time() - self.started), "last_sync_down": self.last_sync_down,
                 "last_sync_ok": self.last_sync_ok, "last_sync_error": self.last_sync_error,
                 "last_push": self.last_push, "last_push_ok": self.last_push_ok, "last_push_error": self.last_push_error,
+                "guard_error": self.guard_error,
                 "worktree_dirty": dirty, "rebasing": rebasing,
                 "pending_edits": pending, "pending_todos": pending_todos, "vault_ok": vault_ok, "version": VERSION,
                 "last_collect": self.sched.last_collect, "collect_failures": self.sched.collect_failures,

@@ -166,6 +166,76 @@ class ServiceSyncTest(unittest.TestCase):
         self.svc.sync_cycle()
         self.assertTrue(self.svc.health()["ok"])
 
+    # ---------- 10-31 事故回归：pull --rebase 冲突 / detached HEAD / 冲突标记 ----------
+    def capture_alerts(self):
+        self.svc.fire = lambda fn: fn()                                         # 同步执行，便于断言
+        self.svc.notifier.push = mock.Mock(return_value="ntfy")
+        return self.svc.notifier.push
+
+    def head(self):
+        return sh("git", "-C", self.data, "rev-parse", "HEAD").strip()
+
+    def on_branch(self):
+        return sh("git", "-C", self.data, "symbolic-ref", "-q", "--short", "HEAD").strip()
+
+    def test_rebase_conflict_aborts_alerts_once_and_never_commits_detached(self):
+        push = self.capture_alerts()
+        with dibao.data_lock():
+            with open(os.path.join(self.data, "notes.txt"), "w") as f:
+                f.write("本地\n")
+            self.svc._commit(["notes.txt"], "local notes")                      # 非 union 文件：真冲突
+        self.web_write("notes.txt", "远端\n")
+        local = self.head()
+        self.svc.sync_cycle()
+        h = self.svc.health()
+        self.assertEqual((h["ok"], h["last_sync_ok"], h["rebasing"], h["worktree_dirty"]), (False, False, False, False))
+        self.assertIn("rebase --abort", h["last_sync_error"])
+        self.assertEqual((self.on_branch(), self.head()), (BR, local))         # 回到原分支原提交
+        self.assertEqual(push.call_count, 1)
+        self.assertTrue(self.local_reading("link-x", "之后"))                   # 之后的提交落在分支上，不在 detached HEAD
+        self.assertEqual(self.on_branch(), BR)
+        self.assertEqual(sh("git", "-C", self.data, "rev-parse", "HEAD~1").strip(), local)
+        self.svc.sync_cycle()                                                   # 再冲突一次：不重复告警
+        self.assertEqual(push.call_count, 1)
+        self.assertFalse(self.svc.health()["ok"])
+        self.assertNotIn("<<<<<<<", self.remote_file("notes.txt"))
+
+    def test_commit_and_push_refused_on_detached_head(self):
+        push = self.capture_alerts()
+        self.svc.push = True
+        sh("git", "-C", self.data, "checkout", "-q", "--detach")
+        before = self.head()
+        with self.assertRaises(dibao.GitGuardError):
+            self.local_reading("link-d", "游离")
+        self.assertEqual(self.head(), before)
+        self.assertFalse(self.svc.do_push())
+        h = self.svc.health()
+        self.assertFalse(h["ok"])
+        self.assertIn("detached", h["guard_error"])
+        self.assertIn("detached", h["last_push_error"])
+        self.svc.sync_cycle()                                                   # detached 时也不拉
+        self.assertFalse(self.svc.health()["last_sync_ok"])
+        self.assertEqual(push.call_count, 2)                                    # commit-state + sync 各一次
+
+    def test_commit_refused_when_staged_content_has_conflict_markers(self):
+        push = self.capture_alerts()
+        before = self.head()
+        with dibao.data_lock():
+            with open(dibao.READINGS, "a", encoding="utf-8") as f:
+                f.write('<<<<<<< HEAD\n{"id": "a"}\n=======\n{"id": "b"}\n>>>>>>> abc123 (todos)\n')
+            with self.assertRaises(dibao.GitGuardError):
+                self.svc._commit(["readings.jsonl"], "bad")
+        self.assertEqual(self.head(), before)
+        h = self.svc.health()
+        self.assertFalse(h["ok"])
+        self.assertIn("冲突标记", h["guard_error"])
+        self.assertEqual(push.call_count, 1)
+
+    def test_conflict_marker_detector(self):
+        self.assertEqual(dibao.conflict_markers("+<<<<<<< HEAD\n"), "<<<<<<<")
+        self.assertEqual(dibao.conflict_markers("+{}\n+=======\n"), "=======")
+        self.assertIsNone(dibao.conflict_markers("+++ b/x.jsonl\n+{\"t\": \"a <<<<<<< b\"}\n-<<<<<<< old\n"))
+
 
 if __name__ == "__main__":
     unittest.main()
