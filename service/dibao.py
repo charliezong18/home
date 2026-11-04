@@ -243,12 +243,18 @@ class Service:
         try:
             with self.svc:
                 with data_lock():
-                    _, _, todo = todo_actions.summarize(todo_actions.read_records(TODO_ACTIONS), todo_actions.local_done())
-            if not todo:
+                    local = todo_actions.local_lines()
+                    first, final, todo = todo_actions.summarize(todo_actions.read_records(TODO_ACTIONS), local)
+            # 本机账本记过、但状态行没进 home-data（提交前进程挂了 / 提交丢失）：不重放 gog，只把记住的状态行补写回去
+            lines = {i: local[i] for i, a in first.items() if a.get("state") == "pending" and i not in final and i in local}
+            if not todo and not lines:
                 return {}
-            lines = {}
             for a in todo:                                   # 文件顺序：先勾后撤销 = 最终未完成
-                state, detail = todo_actions.execute(a, self.todo_runner, sleep=self.todo_sleep)
+                try:
+                    state, detail = todo_actions.execute(a, self.todo_runner, sleep=self.todo_sleep)
+                except Exception as e:  # noqa: BLE001 — 一条出意外不能让同批已执行的状态行丢掉
+                    log.exception("todo %s 执行异常", a["id"])
+                    state, detail = "failed", f"执行异常：{type(e).__name__}"
                 line = todo_actions.state_line(a["id"], state, detail, now_iso())
                 todo_actions.remember(line)
                 lines[a["id"]] = line

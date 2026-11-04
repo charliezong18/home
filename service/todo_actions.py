@@ -36,7 +36,8 @@ TITLE_MAX = 200
 RETRIES = 3                                                 # 瞬时错误再试 3 次
 BACKOFF = 2                                                 # 2 s、4 s、8 s
 TRANSIENT_RE = re.compile(r"\b5\d\d\b|backend ?error|internal ?error|unavailable|timed? ?out|超时|起不来"
-                          r"|connection (?:reset|refused)|temporar", re.I)
+                          r"|connection (?:reset|refused)|temporar"
+                          r"|no such host|network is unreachable|no route to host", re.I)   # 断网 / DNS 失败
 
 
 def state_path():
@@ -74,8 +75,13 @@ def read_records(path):
         return []
 
 
+def local_lines(path=None):
+    """本机账本 → {id: 最后一条状态行}。"""
+    return {r["id"]: r for r in read_records(path or state_path())}
+
+
 def local_done(path=None):
-    return {r["id"] for r in read_records(path or state_path())}
+    return set(local_lines(path))
 
 
 def summarize(records, done_ids=()):
@@ -92,7 +98,10 @@ def summarize(records, done_ids=()):
 def _gog(runner, args, timeout=CALL_TIMEOUT):
     """→ (rc, stdout, 错误文本)；超时 / 起不来 rc=None。"""
     try:
-        r = runner([GOG, "tasks", *args, "--no-input", "--color=never"], capture_output=True, text=True, timeout=timeout)
+        # errors="replace"：gog 跑完后 stdout/stderr 不是 UTF-8 也不能抛——此时 Google Tasks 里可能已经改了，
+        # 抛出去会被标成粘住的 failed（实际却成功了）。
+        r = runner([GOG, "tasks", *args, "--no-input", "--color=never"], capture_output=True, text=True,
+                   errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return None, "", f"gog 超时 {timeout}s"
     except OSError as e:
