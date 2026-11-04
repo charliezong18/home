@@ -1,6 +1,8 @@
 import json
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import unittest
 import urllib.error
@@ -142,15 +144,36 @@ class HttpTest(unittest.TestCase):
 
 
 class SyncTest(unittest.TestCase):
-    """GitHub 拉回：另一个克隆（模拟网页 / iOS）往远端追加 pending 行，服务一轮 sync_cycle 就落卡。"""
+    """GitHub 拉回：另一个克隆（模拟网页 / iOS）往远端追加 pending 行，服务一轮 sync_cycle 就落卡。
+
+    自包含：remote / 另一个克隆放在每次新建的临时目录里（重跑不会撞上「目标已存在」）；
+    tearDown 把共享的 _env.DATA 恢复原样（去掉 origin、回到测试前的提交、还原快照），与执行顺序无关。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sync-", dir=_env.ROOT)
+        self.head = _env.sh("git", "-C", _env.DATA, "rev-parse", "HEAD").strip()
+        with open(_env.SNAP, encoding="utf-8") as f:
+            self.snap = f.read()
+
+    def tearDown(self):
+        sh = _env.sh
+        if "origin" in sh("git", "-C", _env.DATA, "remote").split():
+            sh("git", "-C", _env.DATA, "remote", "remove", "origin")
+        sh("git", "-C", _env.DATA, "reset", "-q", "--hard", self.head)
+        sh("git", "-C", _env.DATA, "clean", "-qfd")
+        with open(_env.SNAP, "w", encoding="utf-8") as f:
+            f.write(self.snap)
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_sync_down_applies_remote_pending(self):
         sh = _env.sh
-        sh("git", "init", "-q", "--bare", "-b", "home-data", _env.REMOTE)
-        sh("git", "-C", _env.DATA, "remote", "add", "origin", _env.REMOTE)
+        remote = os.path.join(self.tmp, "remote.git")
+        sh("git", "init", "-q", "--bare", "-b", "home-data", remote)
+        sh("git", "-C", _env.DATA, "remote", "add", "origin", remote)
         sh("git", "-C", _env.DATA, "push", "-q", "origin", "HEAD:home-data")
-        other = os.path.join(_env.ROOT, "other")
-        sh("git", "clone", "-q", "-b", "home-data", _env.REMOTE, other)
+        other = os.path.join(self.tmp, "other")
+        sh("git", "clone", "-q", "-b", "home-data", remote, other, cwd=self.tmp)
         sh("git", "-C", other, "config", "user.email", "o@example.com")
         sh("git", "-C", other, "config", "user.name", "o")
         # 本地先有一次未推送的账本追加；远端同时在同一文件末尾追加 → union 合并不冲突
