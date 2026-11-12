@@ -142,6 +142,26 @@ class TestScan(Base):
         self.assertEqual(sorted(res["new-reference"]), [176, 191])
         self.assertEqual(len(d["references"]), 2)
 
+    def test_folded_into_parent_is_reference_not_job(self):
+        # 合并速审：原折留「已并入 #N…决定以 #N 为准」后被 merge，执行归父折那一单，不另生成待接手单
+        gh = FakeGH([pr(192, "2026-10-24T20:10:00Z", kind="拍板"), pr(186, "2026-10-24T20:11:00Z")], {
+            186: [{"id": 9, "created_at": "2026-10-24T20:10:58Z",
+                   "body": "已并入 #192（2026-10-28 画可），决定以 #192 为准：https://x/?pr=192"}],
+            192: [{"id": 8, "created_at": "2026-10-24T20:09:00Z", "body": "原 4 折 #186 已并入本折"}]})
+        res = A.scan(gh=gh)
+        d = self.jobs()
+        self.assertEqual(res["new-job"], [192])  # 父折自己提「已并入本折」不算被并入
+        self.assertEqual(res["new-reference"], [186])
+        ref = d["references"][f"{R}#186@{186:040d}"]
+        self.assertEqual(ref["merged_into"], 192)
+        self.assertIn("#192", ref["note"])
+
+    def test_folded_marker_from_inline_or_self_is_ignored(self):
+        gh = FakeGH([pr(187, "2026-10-24T20:11:00Z")], {
+            187: [{"id": 7, "created_at": "2026-10-24T20:10:00Z", "body": "> 引文\n\n已并入 #187 自己"}]})
+        res = A.scan(gh=gh)
+        self.assertEqual(res["new-job"], [187])
+
     def test_restart_and_failure_catch_up(self):
         gh = FakeGH([])
         A.scan(gh=gh)                       # 20:30 游标
