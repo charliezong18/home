@@ -9,6 +9,7 @@
 
 幂等键：repo#PR@merge_sha。同一 merge 重复出现（重复事件、重叠窗口、重启重扫）＝ no-op。
 kind:读物 / kind:参考 → 记 reference（仅留档，不生成执行单）。
+会话区以「已并入 #N」开头的折（合并速审的原折）→ 记 reference 并带 merged_into=N，执行归 #N 那一单。
 
 状态：pending 待接手 → executing 执行中 → verifying 验收 → done 完成；blocked 阻塞 旁路。
   done 只能从 verifying 来且必须 --evidence；done 是终态。
@@ -54,6 +55,8 @@ ALLOWED = {
     "done": set(),
 }
 AUTO_MARKERS = ("<!-- menxia-readstate", "**回话**")
+# 合并速审的处置标记：原折会话区首行「已并入 #N（…画可），决定以 #N 为准」后被 merge——执行归 #N 那一单
+FOLDED_RE = re.compile(r"^已并入\s*#(\d+)")
 
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "/usr/bin:/bin")
 
@@ -230,6 +233,17 @@ def section(body, title):
     return "\n".join(lines).strip() or None
 
 
+def folded_into(n, decisions):
+    """会话区评论以「已并入 #N」开头（N≠本折）→ N；行内批注与自指不算。"""
+    for d in decisions:
+        if d["where"] != "conversation":
+            continue
+        m = FOLDED_RE.match(d["body"])
+        if m and int(m.group(1)) != n:
+            return int(m.group(1))
+    return None
+
+
 def ingest(data, pr, gh=gh_json, db=None):
     """返回 'new-job' / 'new-reference' / 'dup'。"""
     k = key_of(pr)
@@ -243,6 +257,13 @@ def ingest(data, pr, gh=gh_json, db=None):
         data["references"][k] = {**base, "note": "读物/参考：画可＝读毕，不生成执行单"}
         queue_event(data, f"reference {k}")
         return "new-reference"
+    decisions = fetch_decisions(pr["number"], gh)
+    parent = folded_into(pr["number"], decisions)
+    if parent:
+        data["references"][k] = {**base, "merged_into": parent,
+                                 "note": f"已并入 #{parent}：merge＝并折处置，执行归 #{parent} 那一单，不生成执行单"}
+        queue_event(data, f"reference {k} merged_into=#{parent}")
+        return "new-reference"
     owner, why = resolve_owner(pr, db)
     data["jobs"][k] = {
         **base, "state": "pending", "state_zh": STATES["pending"],
@@ -250,7 +271,7 @@ def ingest(data, pr, gh=gh_json, db=None):
         "authorized_scope": None,
         "pending_decisions": section(pr.get("body"), "待你拍板"),
         "destination": section(pr.get("body"), "目的地"),
-        "decisions": fetch_decisions(pr["number"], gh),
+        "decisions": decisions,
         "owner_session": owner, "owner_reason": why,
         "task_id": None, "evidence": None, "block_reason": None,
         "history": [{"at": iso(now()), "to": "pending", "by": "scan"}], "event_ids": [],
