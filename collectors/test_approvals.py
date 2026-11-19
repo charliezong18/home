@@ -69,6 +69,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         A.STATE_DIR = os.path.join(self.tmp.name, "state")
+        A.SERVICE_TOKEN_FILE = os.path.join(self.tmp.name, "no-such-runner.token")  # 不碰真 token / 网络
         self.db = os.path.join(self.tmp.name, "state.db")
         con = sqlite3.connect(self.db)
         con.execute("create table sessions (id text primary key, source text)")

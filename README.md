@@ -204,6 +204,39 @@ python3 ~/Developer/home/collectors/apply_edits.py --mark-done <id> --result "�
 
 台账 `~/.local/state/menxia-approvals/approvals.json`、`events.log`；日志 `~/Library/Logs/ai-home/approvals.log`。命令见 `approvals.py` 文首；单测 `python3 collectors/test_approvals.py -v`。
 
+**门下服务来源**：同一轮 `scan` 还扫门下服务（Cloudflare Worker）的 `GET /api/v1/events`，只收 `decision.created` 且 `verdict=approve`，按 `menxia-service#<rv_id>@<decision_id>` 幂等记单（`source: menxia-service`，`pr: null`，带 `review_id/revision_no/web_url`、questions 当「待你拍板」、全部 decisions 当判）。服务游标 `service_cursor` 与 GitHub 游标独立；首次只收 24 小时内的画可。token 读 `$MENXIA_SERVICE_TOKEN_FILE`（默认 `~/.config/menxia-service/runner.token`，必须 600）；文件不存在、为空或权限过宽 → 跳过此来源，scan 日志写一行 `service: 跳过（…）`，不报错。服务挂了只写 `service: FAIL …`，不影响 GitHub 来源。服务来源没有 label，`sync` 对它是 no-op。
+
+## 画可自动执行（approval_runner.py + approvals_digest.py）
+
+`collectors/approval_runner.py` 是台账的唯一消费者，cron 每 10 分钟跑一次，stdout 一行或空。全局并发 1（文件锁 + 同一时间只有一张在办单），每轮只推进一步：
+
+1. **定范围**：只读 `claude -p --strict-mcp-config`（opus，cwd `~/Developer/op`，凭据前缀照抄 hd.py 的 `AUTH_PREFIX`，工具只给 Read/Grep/Glob），喂折文档原文（GitHub：PR 改动的 `.md` 在 merge sha 处；服务：批准时 revision）、判与「待你拍板」。输出 `executable_steps / gated_steps / repos / acceptance / notes`。采购、付款、对外发消息/邮件、公开发布、App Store、签署、登录/2FA、不可逆删除永远是 gated；执行器再用关键词兜一层，可执行步骤里撞到就挪进 gated。没有可执行步骤 → 直接 blocked + 出报告。
+2. **执行**：`hd.py create --template build --complex --max-turns 60 --task-id ax-…`（task_id 由幂等键哈希决定），claim 写 task_id 与范围，后台启动 worker，`hd attach`。worker brief 写死：批准原文、可执行步骤、gated 清单（遇到即停）、验收标准、每单独立分支 `autoexec/<slug>` + `~/Developer/worktrees/<repo>/<slug>` worktree、开 PR 不合并、iOS 只用 `op/tools/menxia-vm.sh`、非代码交付写 outputs、第 50 回合起先 push 再报告、最后一行 `AUTOEXEC_STATUS: {...}`。
+3. **收尾**（worker 退出后的下一轮）：读 hd run json，写 `~/Developer/op/outputs/approvals/<slug>/RESULT.zh-CN.md`，呈门下（GitHub：原折 `gh pr comment`（以 `**回话**` 开头，不算判）+ 起一个 sonnet 小 worker 用 `mcp__menxia__open_folder` 开 `kind:交付 wait:你读` 读物折，同 `proj:*`；服务：该 review 下 `POST /comments`），然后 transition done/blocked + evidence，再 `approvals.py sync`。permission_denials 非空、subtype 非 success、测试未过（`tests_passed=false`）、或没给 `AUTOEXEC_STATUS` → blocked。worker 没有退出记录且进程不在，或超过 `wall_clock_hours` → blocked。
+
+幂等与续跑：定范围结果、派工命令、worker pid 都落在 `~/.local/state/menxia-approvals/autoexec/<slug>/`；收尾每一步在 `job.autoexec` 里打标。任何一步崩溃，下一轮从断点继续，同一 key 只会建一个 hd 任务、只会评论一次。
+
+**开关与配置** `~/.config/menxia-approvals/autoexec.json`（`$MENXIA_AUTOEXEC_CONFIG`；缺失 = 关闭）：
+
+```json
+{"enabled": true, "autoexec_since": "2026-11-19T00:00:00Z", "kinds": ["设计", "拍板"],
+ "daily_limit": 3, "wall_clock_hours": 4, "scope_timeout_sec": 1200}
+```
+
+`autoexec_since` 按画可时刻比较（GitHub 为 `merged_at`，服务为决定时间），早于它的旧积压永远不自动跑；不填则一单都不跑。每日上限按本地日期、以「开始定范围」计数。
+
+**急停**：`touch ~/.local/state/menxia-approvals/AUTOEXEC_PAUSE`，存在时整轮不动（包括收尾）；已在跑的 worker 不会被杀，要停它用 hd/kill。删掉文件即恢复，断点续上。
+
+**预演**：`approval_runner.py --dry-run [--autoexec-since ISO]` 只读台账，打印每张单「会」怎么处理，不调 claude/hd/gh，不写状态。
+
+**30 分钟汇报** `collectors/approvals_digest.py`：读台账 history，游标 `~/.local/state/menxia-approvals/digest.json`（每个 key 已报到第几条）。只报新出现的「开始执行 / 完成 / 卡住」，每条一句话 + 链接（GitHub 折 `https://menxia-reader.github.io/menxia/?pr=N`，服务单用 `web_url`）+ 报告路径；无变化输出空。只打印，不发送。`--peek` 不前移游标。
+
+**Hermes 安装清单**（本仓不装）：
+- 写配置文件（`enabled: true`，`autoexec_since` = 启用时刻）。
+- 发放门下服务 runner token 到 `~/.config/menxia-service/runner.token`（chmod 600），没有 token 服务来源就一直跳过。
+- cron：`/opt/homebrew/bin/python3 ~/Developer/home/collectors/approval_runner.py` 每 10 分钟，no-agent。
+- cron：`/opt/homebrew/bin/python3 ~/Developer/home/collectors/approvals_digest.py` 每 30 分钟，no-agent，deliver `telegram:8158116597`。
+
 ## 手动跑
 
 ```bash
