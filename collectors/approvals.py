@@ -44,6 +44,7 @@ import sys
 from contextlib import contextmanager
 
 REPO = os.environ.get("MENXIA_REPO", "charliezong18/review")
+CHARLIE = os.environ.get("MENXIA_CHARLIE_LOGIN", "charliezong18")
 STATE_DIR = os.path.expanduser(os.environ.get("MENXIA_APPROVALS_STATE", "~/.local/state/menxia-approvals"))
 HERMES_DB = os.path.expanduser(os.environ.get("MENXIA_HERMES_DB", "~/.hermes/state.db"))
 OVERLAP = _dt.timedelta(hours=6)
@@ -116,15 +117,17 @@ def gh_pages(path, gh=gh_json, per_page=100):
 
 
 def fetch_decisions(n, gh=gh_json):
-    """他在折里的判（原文）：会话区评论 + 行内评论，去掉续读标记与 agent 的 **回话**。"""
+    """他在折里的判（原文）：会话区评论 + 行内评论，只收 Charlie 账号（user.login）的，去掉续读标记与 agent 的 **回话**。
+    局限：agent 也用 Charlie 的 gh 账号时，login 区分不了人和 agent；靠 **回话** 前缀排除 agent 回复。"""
     items = []
     for kind, path in (("conversation", f"repos/{REPO}/issues/{n}/comments"),
                        ("inline", f"repos/{REPO}/pulls/{n}/comments")):
         for c in gh_pages(path, gh):
             body = (c.get("body") or "").strip()
-            if not body or body.startswith(AUTO_MARKERS):
+            author = (c.get("user") or {}).get("login")
+            if not body or body.startswith(AUTO_MARKERS) or author != CHARLIE:
                 continue
-            items.append({"id": c["id"], "where": kind, "at": c["created_at"],
+            items.append({"id": c["id"], "where": kind, "at": c["created_at"], "author": author,
                           "path": c.get("path"), "body": body[:2000]})
     return sorted(items, key=lambda x: x["at"])
 
@@ -240,8 +243,11 @@ def ingest(data, pr, gh=gh_json, db=None):
     if k in data["jobs"] or k in data["references"]:
         return "dup"
     labels = labels_of(pr)
+    merged_by = (pr.get("merged_by") or {}).get("login")
+    if not merged_by:  # pulls 列表接口不带 merged_by，取单个 PR 详情补上（执行器只认 Charlie 画可）
+        merged_by = ((gh(f"repos/{REPO}/pulls/{pr['number']}") or {}).get("merged_by") or {}).get("login")
     base = {"key": k, "repo": REPO, "pr": pr["number"], "title": pr["title"], "merge_sha": pr["merge_commit_sha"],
-            "merged_at": pr["merged_at"], "merged_by": (pr.get("merged_by") or {}).get("login"),
+            "merged_at": pr["merged_at"], "merged_by": merged_by,
             "labels_at_merge": labels, "detected_at": iso(now())}
     if kind_of(labels) in REFERENCE_KINDS:
         data["references"][k] = {**base, "note": "读物/参考：画可＝读毕，不生成执行单"}
@@ -305,6 +311,14 @@ def ingest_service(data, ev, http, token):
     k = service_key(rid, did)
     if k in data["jobs"] or k in data["references"]:
         return "dup"
+    rev = (ev.get("data") or {}).get("revision_no")
+    for j in list(data["jobs"].values()) + list(data["references"].values()):  # 同一 review 同一 revision 重复 approve
+        if j.get("source") == SERVICE and j.get("review_id") == rid and j.get("revision_no") == rev:
+            j.setdefault("duplicate_decisions", [])
+            if did not in j["duplicate_decisions"]:
+                j["duplicate_decisions"].append(did)
+                queue_event(data, f"dup-approve {rid} rev={rev} decision={did} → {j['key']}")
+            return "dup"
     rv = http("GET", f"/api/v1/reviews/{rid}", token) or {}
     rv = rv.get("review", rv)
     labels = [l if isinstance(l, str) else l.get("name") for l in rv.get("labels") or []]
@@ -320,7 +334,9 @@ def ingest_service(data, ev, http, token):
         return "new-reference"
     decs = http("GET", f"/api/v1/reviews/{rid}/decisions", token) or {}
     decs = decs.get("items", decs) if isinstance(decs, dict) else decs
+    me = next((d for d in decs or [] if d.get("id") == did), {})
     data["jobs"][k] = {
+        "decider": me.get("decider") or None,
         **base, "state": "pending", "state_zh": STATES["pending"],
         "merge_is_authorization": False, "authorized_scope": None,
         "pending_decisions": "\n".join(f"{i + 1}) {q.get('text') or q.get('title') or q}" for i, q in enumerate(qs))
