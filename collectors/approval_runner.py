@@ -1072,13 +1072,42 @@ def render_report(job, scope, o):
 """)[0]
 
 
+RESULT_FOLDER_RE = re.compile(r"RESULT_FOLDER=(\d+)")
+FOLDER_WAIT_SEC = 900  # 读物折号迟迟不出：超时后评论写「报告待发布」，不无限等
+
+
+def result_folder(job):
+    """结果读物折号：台账 result_pr 优先；否则从读物折 worker 日志里取最后一个 RESULT_FOLDER=<n>。只读。"""
+    a = ax(job)
+    if a.get("result_pr"):
+        return str(a["result_pr"])
+    try:
+        with open(os.path.join(work_dir(job["key"]), "publish.log"), encoding="utf-8", errors="replace") as f:
+            m = RESULT_FOLDER_RE.findall(f.read())
+    except OSError:
+        return None
+    return m[-1] if m else None
+
+
+def report_ref(job):
+    """给 Charlie（手机）看的「报告」位置：门下链接，绝不给本机路径。服务来源 → 服务 web_url。"""
+    if job.get("source") == A.SERVICE:
+        return link(job)
+    n = result_folder(job)
+    return f"https://menxia-reader.github.io/menxia/?pr={n}" if n else "报告待发布"
+
+
 def publish(job, cfg, deps, rpath):
-    """呈门下。每步打标，崩溃重启不重发；失败交给 retry_limit。"""
+    """呈门下。每步打标，崩溃重启不重发；失败交给 retry_limit。
+    返回 False = 读物折号还没出来，评论暂缓（下一轮再来）。"""
     key, a, o = job["key"], ax(job), ax(job)["outcome"]
-    body = scrub(f"**回话** 自动执行{'完成' if o['ok'] else '阻塞'}：{o['summary']}\n\n"
-                 f"- 任务：{a.get('task_id') or '（未派工）'}\n- 结果报告：`{rpath}`\n"
-                 + "".join(f"- PR：{p}\n" for p in o.get("prs") or [])
-                 + ("" if o["ok"] else f"- 阻塞原因：{o['reason']}\n"))[0]
+
+    def body_for(j):
+        return scrub(f"**回话** 自动执行{'完成' if o['ok'] else '阻塞'}：{o['summary']}\n\n"
+                     f"- 任务：{a.get('task_id') or '（未派工）'}\n- 结果报告：{report_ref(j)}\n"
+                     + "".join(f"- PR：{p}\n" for p in o.get("prs") or [])
+                     + ("" if o["ok"] else f"- 阻塞原因：{o['reason']}\n"))[0]
+    body = body_for(job)
     if job.get("source") == A.SERVICE:
         if not a.get("service_comment"):
             tok, why = A.service_token()
@@ -1087,9 +1116,6 @@ def publish(job, cfg, deps, rpath):
             deps.service_http("POST", f"/api/v1/reviews/{job['review_id']}/comments", tok, {"body": body})
             patch(key, service_comment=A.iso(now()))
         return
-    if not a.get("gh_comment"):
-        deps.gh(["pr", "comment", str(job["pr"]), "-R", A.REPO, "--body", body])
-        patch(key, gh_comment=A.iso(now()))
     if not a.get("folder_task"):
         tid = task_id(key, "axpub")
         d = work_dir(key)
@@ -1099,7 +1125,8 @@ def publish(job, cfg, deps, rpath):
             proj = [l for l in job.get("labels_at_merge") or [] if l.startswith("proj:")]
             q = (f"把自动执行结果报告呈门下读物折：读 {rpath}，用 mcp__menxia__open_folder 开一份 kind:交付、wait:你读 的读物折"
                  f"（label 另加 {', '.join(proj) or '与原折相同的 proj:*（原折没有就不加）'}），标题「结果：{job.get('title')}」，"
-                 f"正文首段链接原折 {link(job)}。按 review-loop skill 的呈折格式（中英双语）。只呈折，不做别的。")
+                 f"正文首段链接原折 {link(job)}。按 review-loop skill 的呈折格式（中英双语）。只呈折，不做别的。"
+                 f"开完折后，你回复的最后一行必须是 RESULT_FOLDER=<新折的数字号>（例如折号 12 就写 RESULT_FOLDER=12）。")
             rc, out, err = deps.hd(["create", "--template", "build", "--model", "sonnet", "--max-turns", "20",
                                     "--task-id", tid, "--question", q, "--cwd", OP, "--add-dir", os.path.dirname(rpath),
                                     "--allowed-tool", "mcp__menxia__open_folder"])
@@ -1116,7 +1143,17 @@ def publish(job, cfg, deps, rpath):
             with open(pid_file, "w") as f:
                 f.write(str(pid))
             deps.hd(["attach", "--task-id", tid, "--process-id", str(pid), "--event-id", f"{tid}-attach"])
-        patch(key, folder_task=tid)
+        patch(key, folder_task=tid, folder_launched_at=A.iso(now()))
+    j = read_ledger()["jobs"][key]
+    n = result_folder(j)
+    if n and not ax(j).get("result_pr"):
+        j = patch(key, result_pr=n)
+    if not ax(j).get("gh_comment"):
+        launched = A.parse(ax(j).get("folder_launched_at") or A.iso(now()))
+        if not n and (now() - launched).total_seconds() < FOLDER_WAIT_SEC:
+            return False  # 折号还没出来：评论暂缓，不写路径
+        deps.gh(["pr", "comment", str(job["pr"]), "-R", A.REPO, "--body", body_for(j)])
+        patch(key, gh_comment=A.iso(now()))
 
 
 def close_state(key, o, rpath):
@@ -1144,13 +1181,15 @@ def finish(job, cfg, deps):
             f.write(render_report(job, scope, o))
         job = patch(key, report=rpath)
     close_state(key, o, rpath)
-    publish(read_ledger()["jobs"][key], cfg, deps, rpath)
+    if publish(read_ledger()["jobs"][key], cfg, deps, rpath) is False:
+        return ""  # 等读物折号：留在 finishing，下一轮继续
     try:
         A.sync(key, deps.gh_json, deps.gh_edit)
     except Exception as e:  # noqa: BLE001 — label 回写失败不影响收尾，手动 approvals.py sync 补
         patch(key, sync_error=str(e)[:200])
     patch(key, phase="closed", closed_at=A.iso(now()))
-    return f"门下自动执行：{'完成' if o['ok'] else '卡住'} {job.get('title')}——{o['summary']} {link(job)}"
+    return (f"门下自动执行：{'完成' if o['ok'] else '卡住'} {job.get('title')}——{o['summary']} {link(job)}"
+            f"\n  报告：{report_ref(read_ledger()['jobs'][key])}")
 
 
 def give_up(job, cfg, deps, err):
@@ -1174,7 +1213,7 @@ def give_up(job, cfg, deps, err):
         A.transition(key, "blocked", reason=reason[:1500], evidence=f"报告 {rpath}", by="autoexec",
                      event_id=f"giveup-{key}")
     patch(key, phase="closed", closed_at=A.iso(now()), outcome=o, report=rpath)
-    return f"门下自动执行：卡住 {job.get('title')}——{reason[:200]} {link(job)}"
+    return f"门下自动执行：卡住 {job.get('title')}——{reason[:200]} {link(job)}\n  报告：{report_ref(job)}"
 
 
 # ---------- 一轮 ----------

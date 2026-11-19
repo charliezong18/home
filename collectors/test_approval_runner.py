@@ -63,6 +63,7 @@ class FakeDeps:
         self.tasks, self.labels, self.head, self.rollup = set(), {}, None, [{"conclusion": "SUCCESS", "status": "COMPLETED"}]
         self.pr_state, self.dirty = "OPEN", True
         self.local_tests = []
+        self.folder_no = 77
 
     def gh_json(self, path):
         if "/files" in path:
@@ -115,6 +116,9 @@ class FakeDeps:
         if self.launch_fail:
             raise OSError("FIXTURE launch crash")
         self.launches.append(command)
+        if os.path.basename(log_file) == "publish.log" and self.folder_no:  # 读物折 worker 的回复末行
+            with open(log_file, "a") as f:
+                f.write(f'{{"result": "已开折\\nRESULT_FOLDER={self.folder_no}"}}\n')
         self.pids = getattr(self, "pids", {})
         self.pids[4242 + len(self.launches)] = command
         return 4242 + len(self.launches)
@@ -704,11 +708,44 @@ class TestFlow(Base):
             self.assertIn(must, rep)
         com = [c for c in self.d.gh_calls if c[:2] == ["pr", "comment"]]
         self.assertTrue(com[0][-1].startswith("**回话**"))
+        url = "https://menxia-reader.github.io/menxia/?pr=77"
+        self.assertIn(f"结果报告：{url}", com[0][-1])
+        self.assertNotIn("RESULT.zh-CN.md", com[0][-1])
+        self.assertNotIn("/Users/", com[0][-1])
+        self.assertEqual(j["autoexec"]["result_pr"], "77")
+        self.assertIn(f"报告：{url}", D.digest(self.cfg)[0])
         pub = self.d.creates[-1]
         self.assertIn("mcp__menxia__open_folder", pub)
         self.assertTrue(j["writeback"]["verified"])
         self.assertEqual(R.run_once(self.cfg, self.d), "")
         self.assertEqual(len([c for c in self.d.gh_calls if c[:2] == ["pr", "comment"]]), 1)
+
+    def test_comment_waits_for_folder_then_pending_text_after_timeout(self):
+        self.d.folder_no = None
+        a = self.start()
+        self.finish_worker(a["key"], DONE_LINE)
+        coms = lambda: [c for c in self.d.gh_calls if c[:2] == ["pr", "comment"]]
+        self.assertEqual(R.run_once(self.cfg, self.d), "")  # 折号未出：评论暂缓，不关单
+        self.assertEqual(coms(), [])
+        self.assertNotEqual(self.jobs()[a["key"]]["autoexec"]["phase"], "closed")
+        p = os.path.join(R.work_dir(a["key"]), "publish.log")  # 之后 worker 回了折号
+        with open(p, "a") as f:
+            f.write("RESULT_FOLDER=88\n")
+        self.assertIn("完成", R.run_once(self.cfg, self.d))
+        self.assertIn("?pr=88", coms()[0][-1])
+        self.assertEqual(self.jobs()[a["key"]]["autoexec"]["phase"], "closed")
+
+    def test_comment_after_timeout_says_pending_no_path(self):
+        self.d.folder_no = None
+        a = self.start()
+        self.finish_worker(a["key"], DONE_LINE)
+        R.run_once(self.cfg, self.d)
+        R.patch(a["key"], folder_launched_at="2020-01-01T00:00:00Z")
+        R.run_once(self.cfg, self.d)
+        body = [c for c in self.d.gh_calls if c[:2] == ["pr", "comment"]][0][-1]
+        self.assertIn("结果报告：报告待发布", body)
+        self.assertNotIn("/Users/", body)
+        self.assertNotIn("RESULT.zh-CN.md", body)
 
     def test_since_naive_utc_and_garbage(self):
         c = R.normalize_config(dict(self.cfg, autoexec_since="2026-11-18T00:00:00"))
@@ -805,7 +842,9 @@ class TestDigest(Base):
         R.run_once(self.cfg, self.d)
         out, _ = D.digest(self.cfg)
         self.assertIn("卡住：FIXTURE #300", out)
-        self.assertIn("RESULT.zh-CN.md", out)
+        self.assertIn("报告：https://menxia-reader.github.io/menxia/?pr=77", out)
+        self.assertNotIn("RESULT.zh-CN.md", out)
+        self.assertNotIn("/Users/", out)
         self.assertNotIn("开始执行", out)
 
 
