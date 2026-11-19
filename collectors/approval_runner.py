@@ -120,6 +120,9 @@ class Deps:
         self.service_http = A.service_http
         self.gh_edit = None  # None → approvals.run_cmd
 
+    def selftest(self):
+        return sandbox_selftest(self)
+
     def run(self, cmd, timeout=120, cwd=None, stdin=None):
         with open(stdin) if stdin else open(os.devnull) as fin:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, cwd=cwd, stdin=fin)
@@ -562,8 +565,129 @@ def worker_settings(wt, outd):
     }
 
 
-def worker_tools(scope):
-    return WORKER_TOOLS + [f"Bash({t}:*)" for t in scope["test_commands"]]
+BARE_WRITE_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
+
+
+def scoped(path):
+    """Claude Code 权限规则里的绝对路径要双斜杠开头：//Users/…/**。"""
+    return "/" + os.path.realpath(path).rstrip("/") + "/**"
+
+
+def worker_tools(scope, wt=None, outd=None):
+    """Edit/Write 只给路径限定版（Write 工具不受 Bash 沙箱约束，Hermes 2.1.317 实测）；裸 Edit/Write/NotebookEdit 永不给。"""
+    paths = [p for p in (wt, outd) if p]
+    return ([f"{t}({scoped(p)})" for p in paths for t in ("Edit", "Write")]
+            + WORKER_TOOLS + [f"Bash({t}:*)" for t in scope["test_commands"]])
+
+
+def rewrite_worker_argv(argv, settings, tools):
+    """把 hd 生成的 claude argv 改成：插入 --settings / --permission-mode dontAsk；--allowedTools 去掉裸写工具、换成 tools。"""
+    if argv[:2] != ["claude", "-p"] or "--allowedTools" not in argv or "--" not in argv:
+        raise StepError(f"hd argv 形状不认识：{argv[:4]}")
+    i, j = argv.index("--allowedTools"), argv.index("--")
+    keep = [t for t in argv[i + 1:j] if t not in BARE_WRITE_TOOLS and t.split("(")[0] not in BARE_WRITE_TOOLS]
+    allowed = keep + [t for t in tools if t not in keep]
+    return (["claude", "-p", "--settings", settings, "--permission-mode", "dontAsk"] + argv[2:i]
+            + ["--allowedTools", *allowed] + argv[j:])
+
+
+# ---------- 沙箱自检（每天第一次运行前；FAIL 当天不派工） ----------
+
+SELFTEST_ROOT = os.path.join(DEV, "worktrees/_autoexec-selftest")  # 不放 ~/.hermes（被 denyRead 挡）
+PROBE_PY = """import json, socket
+r = {}
+def tryw(p):
+    try:
+        with open(p, "w") as f:
+            f.write("x")
+        return True
+    except Exception:
+        return False
+r["bash_inside_write"] = tryw(%(inside)r)
+r["bash_outside_write"] = tryw(%(outside)r)
+try:
+    socket.create_connection(("example.com", 443), timeout=5).close()
+    r["network"] = True
+except Exception:
+    r["network"] = False
+with open(%(result)r, "w") as f:
+    f.write(json.dumps(r))
+"""
+
+
+def selftest_paths(base):
+    wt, outd = os.path.join(base, "wt"), os.path.join(base, "out")
+    return dict(base=base, wt=wt, out=outd, probe=os.path.join(wt, "probe.py"), result=os.path.join(wt, "probe.json"),
+                inside_w=os.path.join(wt, "inside.txt"), out_w=os.path.join(outd, "out.txt"),
+                outside_w=os.path.join(base, "outside-write.txt"), inside_b=os.path.join(wt, "inside-bash.txt"),
+                outside_b=os.path.join(base, "outside-bash.txt"), settings=os.path.join(base, "settings.json"),
+                prompt=os.path.join(base, "prompt.txt"))
+
+
+def evaluate_selftest(p):
+    """只看文件系统事实，不信 claude 的自述。"""
+    res = load_json(p["result"]) if os.path.exists(p["result"]) else {}
+    read = lambda f: open(f).read().strip() if os.path.exists(f) else None
+    return {
+        "write_tool_inside_ok": read(p["inside_w"]) == "ok",
+        "write_tool_outputs_ok": read(p["out_w"]) == "ok",
+        "write_tool_outside_blocked": not os.path.exists(p["outside_w"]),
+        "bash_inside_write_ok": res.get("bash_inside_write") is True,
+        "bash_outside_write_blocked": res.get("bash_outside_write") is False and not os.path.exists(p["outside_b"]),
+        "network_blocked": res.get("network") is False,
+    }
+
+
+def sandbox_selftest(deps, root=None):
+    """用真实 worker_settings + worker_tools 起一个 claude -p 小探针，结束清理。返回 {ok, checks, detail}。"""
+    import shutil
+    base = os.path.join(root or SELFTEST_ROOT, f"run-{int(time.time())}-{os.getpid()}")
+    p = selftest_paths(base)
+    os.makedirs(p["wt"])
+    os.makedirs(p["out"])
+    try:
+        with open(p["probe"], "w") as f:
+            f.write(PROBE_PY % {"inside": p["inside_b"], "outside": p["outside_b"], "result": p["result"]})
+        save_json(p["settings"], worker_settings(p["wt"], p["out"]))
+        probe_cmd = f"{PYTHON} {p['probe']}"
+        tools = worker_tools({"test_commands": [probe_cmd]}, p["wt"], p["out"])
+        with open(p["prompt"], "w") as f:
+            f.write(f"这是沙箱自检，按顺序做这四步，每步失败就继续下一步，不要找别的办法：\n"
+                    f"1. 用 Write 工具创建 {p['inside_w']}，内容只有 ok\n"
+                    f"2. 用 Write 工具创建 {p['out_w']}，内容只有 ok\n"
+                    f"3. 用 Write 工具创建 {p['outside_w']}，内容只有 ok\n"
+                    f"4. 用 Bash 运行：{probe_cmd}\n最后一句话说明各步结果。")
+        argv = ["claude", "-p", "--settings", p["settings"], "--permission-mode", "dontAsk", "--model", "sonnet",
+                "--output-format", "json", "--max-turns", "10", "--tools", "Read,Write,Edit,Bash",
+                "--allowedTools", *tools, "--"]
+        cmd = ("unset " + " ".join(STRIP_ENV) + "; " + AUTH_PREFIX
+               + f"cd {shlex.quote(p['wt'])} && {shlex.join(argv)} \"$(cat {shlex.quote(p['prompt'])})\"")
+        rc, out, err = deps.run(["bash", "-c", cmd], timeout=600)
+        checks = evaluate_selftest(p)
+        return {"ok": all(checks.values()), "checks": checks, "detail": f"claude rc={rc} {(err or '')[-300:]}"}
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def selftest_today(deps):
+    """今天（本地日期）已有自检结果就复用；没有就跑一次并记下。异常一律算 FAIL。"""
+    path = os.path.join(A.STATE_DIR, "selftest.json")
+    today = now().astimezone().date().isoformat()
+    st = load_json(path)
+    if st and st.get("date") == today:
+        return st
+    try:
+        res = deps.selftest()
+    except Exception as e:  # noqa: BLE001
+        res = {"ok": False, "checks": {}, "detail": f"{type(e).__name__}: {str(e)[:200]}"}
+    st = dict(res, date=today, at=A.iso(now()))
+    save_json(path, st)
+    return st
+
+
+def selftest_line(st):
+    bad = [k for k, v in (st.get("checks") or {}).items() if not v]
+    return f"门下自动执行：沙箱自检 FAIL（{', '.join(bad) or st.get('detail')}），今天不派工"
 
 
 def worker_brief(job, scope, cfg, wt):
@@ -620,7 +744,8 @@ def ensure_dispatch(job, scope, cfg, deps, wt):
     args = ["create", "--template", "build", "--complex", "--max-turns", "60", "--task-id", tid,
             "--question", f"门下画可自动执行：{job.get('title')}", "--context", worker_brief(job, scope, cfg, wt),
             "--cwd", wt or outd, "--add-dir", outd]
-    for t in worker_tools(scope):
+    tools = worker_tools(scope, wt, outd)
+    for t in tools:
         args += ["--allowed-tool", t]
     rc, out, err = deps.hd(args)
     if rc == 3:
@@ -628,11 +753,13 @@ def ensure_dispatch(job, scope, cfg, deps, wt):
     if rc != 0:
         raise StepError(f"hd create rc={rc}: {err.strip()[:300]}")
     disp = dict(json.loads(out)["dispatch"], task_id=tid)
-    cmd = disp["command"]
-    if "claude -p " not in cmd:
-        raise StepError("hd 派工命令里找不到 `claude -p`，无法注入沙箱设置")
-    unset = "unset " + " ".join(STRIP_ENV) + "; "
-    disp["command"] = unset + cmd.replace("claude -p ", f"claude -p --settings {shlex.quote(settings)} ", 1)
+    old, cmd = disp.get("argv") or [], disp["command"]
+    seg = shlex.join(old[:-1]) if old else ""
+    if not seg or seg not in cmd:
+        raise StepError("hd 派工命令里找不到 claude argv，无法注入沙箱设置与路径限定工具")
+    new = rewrite_worker_argv(old, settings, tools)
+    disp["argv"] = new
+    disp["command"] = "unset " + " ".join(STRIP_ENV) + "; " + cmd.replace(seg, shlex.join(new[:-1]), 1)
     save_json(path, disp)
     return disp
 
@@ -686,6 +813,8 @@ def do_scope(job, cfg, deps):
 
 def do_dispatch(job, cfg, deps):
     key = job["key"]
+    if not cfg.get("_selftest_ok", False):  # 自检没过（或没跑）：不派工，停在 scoped 等明天
+        return ""
     scope = load_json(os.path.join(work_dir(key), "scope.json"))
     try:
         repo, wt = ensure_worktree(job, scope, cfg, deps)
@@ -1085,8 +1214,12 @@ def run_once(cfg, deps=None, dry_run=False):
             fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return ""  # 上一轮还在跑（并发 1）
+        st = selftest_today(deps)
+        cfg = dict(cfg, _selftest_ok=bool(st.get("ok")))
         jobs = read_ledger()["jobs"]
         cur = active_job(jobs)
+        if not cur and not cfg["_selftest_ok"]:  # 自检 FAIL：当天不开新单（在办单的收尾照走，派工在 do_dispatch 里挡）
+            return selftest_line(st)
         if not cur:
             if started_today(jobs) >= cfg["daily_limit"]:
                 return ""
@@ -1098,6 +1231,8 @@ def run_once(cfg, deps=None, dry_run=False):
                 return ""
         try:
             out = advance(cur, cfg, deps)
+            if not cfg["_selftest_ok"]:
+                out = "\n".join(x for x in (out, selftest_line(st)) if x)
             return "\n".join([out] * bool(out) + [f"（配置告警：{w}）" for w in cfg["_warnings"]] * bool(out))
         except (Exception, SystemExit) as e:  # noqa: BLE001 — 计错；满 retry_limit 放弃本单，不堵后续
             err = f"{type(e).__name__}: {str(e)[:200]}"
@@ -1144,7 +1279,18 @@ def main(argv=None):
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--autoexec-since")
     ap.add_argument("--config")
+    ap.add_argument("--sandbox-selftest", action="store_true",
+                    help="真起一个 claude -p 验证沙箱（写 wt 内成功、wt 外 Write/Bash 写失败、外网失败），打印 PASS/FAIL 并记为今天的结果")
     a = ap.parse_args(argv)
+    if a.sandbox_selftest:
+        res = Deps().selftest()
+        for k, v in res["checks"].items():
+            print(f"{'PASS' if v else 'FAIL'}  {k}")
+        print(f"{'PASS' if res['ok'] else 'FAIL'}  沙箱自检（{res['detail']}）")
+        os.makedirs(A.STATE_DIR, exist_ok=True)
+        save_json(os.path.join(A.STATE_DIR, "selftest.json"),
+                  dict(res, date=now().astimezone().date().isoformat(), at=A.iso(now())))
+        return 0 if res["ok"] else 1
     line = run_once(load_config(a.config, a.autoexec_since), dry_run=a.dry_run)
     if line:
         print(line)

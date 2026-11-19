@@ -4,8 +4,10 @@ REVIEW-26 的每条 P0/P1 都有对应测试（类名带编号）。
 """
 import base64
 import datetime as dt
+import glob
 import json
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -95,9 +97,19 @@ class FakeDeps:
             self.tasks.add(tid)
             self.creates.append(args)
             run = os.path.join(self.tmp, "runs", tid)
-            return 0, json.dumps({"dispatch": {"command": f"cd x && claude -p --model opus -- {tid}",
+            extra = [args[i + 1] for i, x in enumerate(args) if x == "--allowed-tool"]
+            argv = ["claude", "-p", "--model", "opus", "--output-format", "json", "--tools",
+                    "Read,Grep,Glob,Edit,Write,Skill,ToolSearch,Bash", "--allowedTools",
+                    "Read", "Grep", "Glob", "Edit", "Write", "Skill", "ToolSearch", *extra, "--", "PROMPT"]
+            cmd = f"cd x && {shlex.join(argv[:-1])} \"$(cat p)\" # {tid}"  # 末尾 tid 供 proc_cmd 识别
+            return 0, json.dumps({"dispatch": {"command": cmd, "argv": argv,
                                                "output_json": run + ".json", "exit_file": run + ".json.exit"}}), ""
         return 0, "{}", ""
+
+    def selftest(self):
+        self.selftests = getattr(self, "selftests", 0) + 1
+        ok = getattr(self, "selftest_ok", True)
+        return {"ok": ok, "checks": {"network_blocked": ok, "write_tool_outside_blocked": ok}, "detail": "FIXTURE"}
 
     def launch(self, command, log_file):
         if self.launch_fail:
@@ -244,6 +256,24 @@ class TestP0_2_Sandbox(Base):
         self.assertTrue(cmd.startswith("unset ") and "GH_TOKEN" in cmd and "RCLONE_CONFIG_PASS" in cmd)
         self.assertIn(["worktree", "add", "-b", R.branch_of(a["key"]), wt, "origin/main"], self.d.git_calls)
 
+    def test_no_bare_edit_write_in_worker_argv(self):
+        a = self.start()
+        j = self.jobs()[a["key"]]
+        wt, outd = j["autoexec"]["worktree"], R.out_dir(j, self.cfg)
+        argv = R.load_json(os.path.join(R.work_dir(a["key"]), "dispatch.json"))["argv"]
+        allowed = argv[argv.index("--allowedTools") + 1: argv.index("--")]
+        self.assertFalse(set(allowed) & {"Edit", "Write", "NotebookEdit", "MultiEdit"}, allowed)
+        for t in ("Edit", "Write"):
+            for p in (wt, outd):
+                self.assertIn(f"{t}(/{os.path.realpath(p)}/**)", allowed)
+        self.assertTrue(all(x.startswith("Edit(//") or x.startswith("Write(//")
+                            for x in allowed if x.split("(")[0] in ("Edit", "Write")))
+        self.assertEqual(argv[:6], ["claude", "-p", "--settings", os.path.join(R.work_dir(a["key"]), "worker.settings.json"),
+                                    "--permission-mode", "dontAsk"])
+        cmd = self.d.launches[0]
+        self.assertIn(shlex.join(argv[:-1]), cmd)
+        self.assertNotIn(" Edit Write ", cmd)
+
     def test_multi_repo_or_outside_dev_blocks(self):
         a = job(151, "2026-11-18T10:00:00Z")
         self.seed(a)
@@ -251,6 +281,79 @@ class TestP0_2_Sandbox(Base):
         R.run_once(self.cfg, self.d)
         self.assertEqual(self.jobs()[a["key"]]["state"], "blocked")
         self.assertEqual([c for c in self.d.creates if "--complex" in c], [])  # 没派执行 worker（只有读物折）
+
+
+# ---------- 沙箱自检（每天第一次；FAIL 当天不派工） ----------
+
+class SelftestRun:
+    """替身：模拟 claude 跑完探针后留在文件系统里的事实。leak=True 模拟 Write 工具写出了 worktree。"""
+    def __init__(self, root, leak=False, net=False):
+        self.root, self.leak, self.net, self.cmds = root, leak, net, []
+
+    def run(self, cmd, timeout=None, **kw):
+        self.cmds.append(cmd[-1])
+        p = R.selftest_paths(glob.glob(os.path.join(self.root, "run-*"))[0])
+        self.paths = p
+        for f in (p["inside_w"], p["out_w"]) + ((p["outside_w"],) if self.leak else ()):
+            with open(f, "w") as fh:
+                fh.write("ok")
+        R.save_json(p["result"], {"bash_inside_write": True, "bash_outside_write": False, "network": self.net})
+        return 0, "{}", ""
+
+
+class TestSandboxSelftest(Base):
+    def test_selftest_pass_and_cleanup(self):
+        root = os.path.join(self.tmp, "selftest-root")
+        d = SelftestRun(root)
+        res = R.sandbox_selftest(d, root)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(glob.glob(os.path.join(root, "run-*")), [])  # 结束清理
+        cmd = d.cmds[0]
+        self.assertIn("--settings", cmd)
+        self.assertIn("dontAsk", cmd)
+        self.assertIn(f"Write(/{os.path.realpath(d.paths['wt'])}/**)", cmd)
+        self.assertNotIn(" Write ", cmd)
+        self.assertTrue(cmd.startswith("unset ") and "GH_TOKEN" in cmd)
+
+    def test_selftest_detects_write_leak_and_network(self):
+        root = os.path.join(self.tmp, "selftest-root")
+        res = R.sandbox_selftest(SelftestRun(root, leak=True), root)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["checks"]["write_tool_outside_blocked"])
+        res = R.sandbox_selftest(SelftestRun(root, net=True), root)
+        self.assertFalse(res["checks"]["network_blocked"])
+
+    def test_default_root_not_under_hermes(self):
+        self.assertNotIn("/.hermes", R.SELFTEST_ROOT)
+        self.assertTrue(R.SELFTEST_ROOT.startswith(os.path.join(R.DEV, "worktrees")))
+
+    def test_fail_blocks_dispatch_for_the_day_and_runs_once(self):
+        self.d.selftest_ok = False
+        self.seed(job(195, "2026-11-18T10:00:00Z"))
+        out = R.run_once(self.cfg, self.d)
+        self.assertIn("沙箱自检 FAIL", out)
+        self.assertEqual((self.d.scopes, self.d.launches), (0, []))
+        self.assertEqual(self.jobs()[job(195, "x")["key"]]["state"], "pending")
+        R.run_once(self.cfg, self.d)
+        self.assertEqual(self.d.selftests, 1)  # 当天只跑一次
+
+    def test_fail_holds_active_job_before_launch(self):
+        a = job(196, "2026-11-18T10:00:00Z")
+        self.seed(a)
+        R.claim(a["key"])
+        self.d.selftest_ok = False
+        out = R.run_once(self.cfg, self.d)
+        self.assertIn("沙箱自检 FAIL", out)
+        self.assertEqual(self.d.launches, [])
+        self.assertEqual(self.jobs()[a["key"]]["autoexec"]["phase"], "scoped")
+
+    def test_selftest_exception_counts_as_fail(self):
+        def boom():
+            raise OSError("FIXTURE claude missing")
+        self.d.selftest = boom
+        self.seed(job(197, "2026-11-18T10:00:00Z"))
+        self.assertIn("沙箱自检 FAIL", R.run_once(self.cfg, self.d))
+        self.assertEqual(self.d.launches, [])
 
 
 # ---------- P0-3：选中即原子 claim；launch 前再核 ----------
