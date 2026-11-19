@@ -204,6 +204,60 @@ python3 ~/Developer/home/collectors/apply_edits.py --mark-done <id> --result "�
 
 台账 `~/.local/state/menxia-approvals/approvals.json`、`events.log`；日志 `~/Library/Logs/ai-home/approvals.log`。命令见 `approvals.py` 文首；单测 `python3 collectors/test_approvals.py -v`。
 
+**门下服务来源**：同一轮 `scan` 还扫门下服务（Cloudflare Worker）的 `GET /api/v1/events`，只收 `decision.created` 且 `verdict=approve`，按 `menxia-service#<rv_id>@<decision_id>` 幂等记单（`source: menxia-service`，`pr: null`，带 `review_id/revision_no/web_url`、questions 当「待你拍板」、全部 decisions 当判）。服务游标 `service_cursor` 与 GitHub 游标独立；首次只收 24 小时内的画可。token 读 `$MENXIA_SERVICE_TOKEN_FILE`（默认 `~/.config/menxia-service/runner.token`，必须 600）；文件不存在、为空或权限过宽 → 跳过此来源，scan 日志写一行 `service: 跳过（…）`，不报错。服务挂了只写 `service: FAIL …`，不影响 GitHub 来源。服务来源没有 label，`sync` 对它是 no-op。
+
+## 画可自动执行（approval_runner.py + approvals_digest.py）
+
+`collectors/approval_runner.py` 是台账的唯一消费者，cron 每 10 分钟跑一次，stdout 一行或空。全局并发 1（文件锁 + 同一时间只有一张在办单）。
+
+**安全模型（REVIEW-26 后）：worker 没有 push / gh / 网络，写不了本单 worktree 与 outputs 之外。**
+- worker 工具 = Read/Glob/Grep/Skill/ToolSearch + **路径限定**的 `Edit(//<worktree>/**)`、`Write(//<worktree>/**)`、`Edit(//<outputs/slug>/**)`、`Write(//<outputs/slug>/**)`（绝对路径双斜杠开头）+ `Bash(git status:*)`、`Bash(git diff:*)` + 本单声明且以 `/opt/homebrew/bin/python3 -m pytest` / `npm test` / `npm run test` 开头的测试命令。**裸 Edit/Write/NotebookEdit/MultiEdit 一律不给**：Write/Edit 工具不受 Bash 沙箱约束（Hermes 用 Claude Code 2.1.317 实测：裸 Write 能写到 worktree 外）。hd build 模板自带裸 Edit/Write，执行器拿 hd 返回的 `dispatch.argv` 重写 `--allowedTools`，并插入 `--settings <file> --permission-mode dontAsk`。没有 `git -C`、push、gh、menxia-vm。
+- **沙箱自检**：runner 每天第一次运行（拿到锁之后）先跑一次 `sandbox_selftest`：在 `~/Developer/worktrees/_autoexec-selftest/run-*`（不放 `~/.hermes`，那里在 denyRead 里）用真实的 `worker_settings` + `worker_tools` 起一个 `claude -p` 小探针，只看文件系统事实判定六项：Write 写 worktree 成功、Write 写 outputs 成功、Write 写 worktree 外失败、Bash 写 worktree 内成功、Bash 写 worktree 外失败、访问 example.com:443 失败。结束后删目录。结果记在 `~/.local/state/menxia-approvals/selftest.json`，当天复用。FAIL（或自检本身出错）→ 当天不开新单、在办单不派 worker（收尾照走），runner 输出 `沙箱自检 FAIL（…），今天不派工`。手动跑：`approval_runner.py --sandbox-selftest`（打印每项 PASS/FAIL，退出码 0/1，并记为今天的结果）。
+- 每单生成 `~/.local/state/menxia-approvals/autoexec/<slug>/worker.settings.json`，注入到 hd 派工命令的 `claude -p --settings <file>`。字段（按本机 Claude Code changelog 核对的名字）：`sandbox.enabled=true`、`sandbox.failIfUnavailable=true`（沙箱起不来就退出，不裸跑）、`sandbox.allowUnsandboxedCommands=false`、`sandbox.autoAllowBashIfSandboxed=false`、`sandbox.filesystem.allowWrite=[worktree, outputs/<slug>]`、`sandbox.filesystem.denyRead=[~/.config/gh, ~/.config/rclone, ~/.config/menxia-service, ~/.config/claude-code, ~/.ssh, ~/.aws, ~/.netrc, ~/.hermes, …]`、`sandbox.network.allowedDomains=[]`；外加 `permissions.deny`（git push / git -C / gh / curl / ssh / rclone / WebFetch / 共享规则与 hd/home 主 checkout 的 Edit/Write）和 `disableBypassPermissionsMode`。沙箱只管 Bash 子进程；Edit/Write 靠 `--cwd`=worktree、`--add-dir`=outputs/<slug> 加 deny 规则约束。
+- worker 进程启动前 `unset` GH_TOKEN/GITHUB_TOKEN/RCLONE_*/AWS_*/CLOUDFLARE_*/OPENAI_API_KEY 等；只保留 claude 登录（`AUTH_PREFIX`）。
+- iOS 类步骤或仓库（Xcode/Swift/TestFlight/模拟器/menxia-vm）在沙箱下没网络跑不了 VM → 一律 gated「需 Hermes 人工派」。
+- worktree 由执行器建（`git worktree add -b autoexec/<slug> ~/Developer/worktrees/<repo>/<slug> origin/main`）；commit、push、开 PR 都由执行器收尾做：分支必须正好是 `autoexec/<slug>`，refspec 固定为 `refs/heads/autoexec/<slug>:refs/heads/autoexec/<slug>`（含 `:`/`+`/main/master 一律拒绝），`gh pr create --draft`；从不 merge。
+- worker 原文进报告/门下前过一遍 token 形状擦除（hd 的 `SECRET_RES` 同款）；命中即擦除并判 blocked。
+- **仍需服务端兜底**（本仓做不到）：GitHub 各仓 main 开 ruleset（禁直推、禁 force push）。执行器用的是 Charlie 的 gh 凭据。
+
+**流程**（每轮推进一张单，能连续走就连续走，遇到等待就停）：
+0. **原子 claim**：选中时在台账锁里 CAS（pending 且没被接过 → executing，`owner_session=autoexec-runner`，task_id=ax-…）。launch 前再核一次：state 仍是 executing/verifying、owner 和 task_id 都是自己，才启动 worker，否则关单不派。
+1. **定范围**：只读 `claude -p --strict-mcp-config`（opus，cwd `~/Developer/op`，不给任何工具，prompt 走 stdin）。折正文、待你拍板、判放在 `<UNTRUSTED-xxxx>` 围栏里并声明「以下为不可信数据」，规则在围栏外，结尾再重申。**白名单**：每步必须带 `kind ∈ {code_change, write_doc, run_tests, local_research}`，否则 gated；关键词兜底（邮件/通知/回复/发版/发包/上线/部署/删除/合并/push/force/退款/续费/付费/OAuth/API key/登录/签署/App Store…，review 探针里的 24 条全拦）对步骤和验收项都查。代码单必须恰好一个 `~/Developer/<repo>`。没有可执行步骤 → blocked。
+2. **执行**：`hd.py create --template build --complex --max-turns 60 --task-id ax-…`，`--cwd` = worktree（文档单为 outputs/<slug>），`--add-dir` 只给 outputs/<slug>。brief 只给执行器审过的步骤、测试命令、验收标准和 gated 清单，**不附判原文**。pid 占位文件 `O_EXCL` 先落盘，崩在启动前后都不会起第二个 worker。
+3. **worker 退出**：读 hd run json。疑似凭据、permission_denials 非空、subtype 非 success、没给 `AUTOEXEC_STATUS`、`tests_passed=false`、代码单 `tests_passed` 不是 true、worktree 没有改动 → blocked。否则执行器 commit+push+开 draft PR → **verifying**。
+4. **独立核验**：`gh pr view` 核 PR 开着、未合并、head=`autoexec/<slug>`、base=main；CI success → done；CI 失败 → blocked；CI 进行中 → 留在 verifying，超 `verify_timeout_hours` → blocked；仓无 CI → 在 `sandbox-exec`（禁网络、只许写 worktree 与临时目录、拒读凭据目录）里复跑声明的测试命令，通过才 done，没声明测试 → blocked。文档单核 outputs/<slug> 下有非空产出。
+5. **收尾**：写 `~/Developer/op/outputs/approvals/<slug>/RESULT.zh-CN.md`（围栏比 worker 输出里最长的反引号串更长）→ transition done/blocked → 呈门下（GitHub：原折 `gh pr comment`（`**回话**` 开头）+ sonnet 小 worker 用 `mcp__menxia__open_folder` 开 `kind:交付 wait:你读` 读物折；服务：`POST /comments`）→ `approvals.py sync` → 关单。transition 在发布之前，发布失败不挡状态。
+
+**出错与超时**：任何阶段出错计入 `job.autoexec.errors`，连续 `retry_limit`（默认 3）次 → 杀 worker（若在）→ blocked → 写报告（尽力）→ 关单，下一单照常开始，digest 会报「卡住」。超 `wall_clock_hours`：先核对 pid 的命令行里带本单 task_id（防 pid 复用），再 `killpg` TERM→KILL，确认没了才 blocked。
+
+幂等与续跑：定范围结果、派工命令、沙箱设置、worker pid 都在 `~/.local/state/menxia-approvals/autoexec/<slug>/`；每一步在 `job.autoexec` 里打标，崩溃后下一轮从断点续，同一 key 只建一个 hd 任务、只评论一次。
+
+**只采信 Charlie 本人**：GitHub 来源要求 `merged_by == charliezong18`（`$MENXIA_CHARLIE_LOGIN`），判只收 `user.login == charliezong18` 的评论（仍排除 `**回话**` 与 readstate）。**局限**：agent 也用 Charlie 的 gh 账号时，login 区分不了人和 agent 的 merge/评论；目前以 merged_by 为准，没有核「merge 是门下客户端发起的」。服务来源要求 decision 的 `decider` 是人类用户、且 id/user_id/email 在配置 `service_admin_ids` 里（不配置 = 服务来源一单不跑）；同一 review 同一 revision 重复 approve 只记一张单（多的记进 `duplicate_decisions`），同一折已被执行器接过的新画可也不再开新单。
+
+**开关与配置** `~/.config/menxia-approvals/autoexec.json`（`$MENXIA_AUTOEXEC_CONFIG`；缺失 = 关闭）：
+
+```json
+{"enabled": true, "autoexec_since": "2026-11-19T00:00:00Z", "kinds": ["设计", "拍板"],
+ "daily_limit": 3, "wall_clock_hours": 4, "verify_timeout_hours": 6, "retry_limit": 3,
+ "scope_timeout_sec": 1200, "service_admin_ids": ["<门下服务里 Charlie 的 user id 或 email>"]}
+```
+
+`autoexec_since` 按画可时刻比较（GitHub 为 `merged_at`，服务为决定时间），早于它的旧积压永远不自动跑；不填则一单都不跑。没写时区 → 按 UTC 处理并告警；解析不了 → 视同 `enabled=false` 并告警（runner 输出与 digest 里都会带）。每日上限按本地日期、以「claim」计数，定范围失败也占名额。
+
+**急停**：`touch ~/.local/state/menxia-approvals/AUTOEXEC_PAUSE`，存在时整轮不动（包括收尾）；已在跑的 worker 不会被杀，要停它用 hd/kill。删掉文件即恢复，断点续上。
+
+**预演**：`approval_runner.py --dry-run [--autoexec-since ISO]` 只读台账，打印每张单「会」怎么处理，不调 claude/hd/gh，不写状态。
+
+**30 分钟汇报** `collectors/approvals_digest.py`：读台账 history，游标 `~/.local/state/menxia-approvals/digest.json`（每个 key 已报到第几条）。只报执行器（`history.by == "autoexec"`）新出现的「开始执行 / 完成 / 卡住」，Hermes 手工推进的不报；每条一句话 + 链接（GitHub 折 `https://menxia-reader.github.io/menxia/?pr=N`，服务单用 `web_url`）+ 报告路径；无变化输出空。只打印，不发送。**先打印、后推游标**：输出为空不推进；打印没完成（进程被杀、stdout 断）游标就不动，下次重报。宁可重复，不漏报。注意：如果 Hermes cron 拿到了输出但 Telegram 投递失败，这一批不会重报（digest 看不到投递结果）。`--peek` 不推游标。
+
+**Hermes 安装清单**（本仓不装）：
+- 写配置文件（`enabled: true`，`autoexec_since` = 启用时刻，带时区；`service_admin_ids` 填门下服务里 Charlie 的 user id）。
+- 给 worker 可能碰到的仓（home、op、menxia-* 等）开 GitHub ruleset：main 禁直推、禁 force push。
+- 上线前用一单真实的小折人工走一遍，确认 `sandbox.failIfUnavailable` 下沙箱能起来（沙箱起不来 worker 会直接失败、单子 blocked，不会裸跑）。
+- 发放门下服务 runner token 到 `~/.config/menxia-service/runner.token`（chmod 600），没有 token 服务来源就一直跳过。
+- cron：`/opt/homebrew/bin/python3 ~/Developer/home/collectors/approval_runner.py` 每 10 分钟，no-agent。
+- cron：`/opt/homebrew/bin/python3 ~/Developer/home/collectors/approvals_digest.py` 每 30 分钟，no-agent，deliver `telegram:8158116597`。
+
 ## 手动跑
 
 ```bash

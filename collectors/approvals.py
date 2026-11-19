@@ -7,6 +7,10 @@
 数据源：GitHub REST（gh api，只读）`pulls?state=closed&sort=updated`，按游标增量；
 游标只在整轮成功后前移，且每轮回看 OVERLAP，进程停掉/重启/某轮失败后下一轮自动补漏。
 
+第二来源：门下服务 GET /api/v1/events 的 decision.created(verdict=approve)，键 menxia-service#<rv_id>@<decision_id>；
+token 读 $MENXIA_SERVICE_TOKEN_FILE（默认 ~/.config/menxia-service/runner.token，600），缺失则跳过并在日志写一行。
+消费者是 approval_runner.py（自动执行）；本文件仍只检测、记账、回写。
+
 幂等键：repo#PR@merge_sha。同一 merge 重复出现（重复事件、重叠窗口、重启重扫）＝ no-op。
 kind:读物 / kind:参考 → 记 reference（仅留档，不生成执行单）。
 
@@ -40,6 +44,7 @@ import sys
 from contextlib import contextmanager
 
 REPO = os.environ.get("MENXIA_REPO", "charliezong18/review")
+CHARLIE = os.environ.get("MENXIA_CHARLIE_LOGIN", "charliezong18")
 STATE_DIR = os.path.expanduser(os.environ.get("MENXIA_APPROVALS_STATE", "~/.local/state/menxia-approvals"))
 HERMES_DB = os.path.expanduser(os.environ.get("MENXIA_HERMES_DB", "~/.hermes/state.db"))
 OVERLAP = _dt.timedelta(hours=6)
@@ -112,15 +117,17 @@ def gh_pages(path, gh=gh_json, per_page=100):
 
 
 def fetch_decisions(n, gh=gh_json):
-    """他在折里的判（原文）：会话区评论 + 行内评论，去掉续读标记与 agent 的 **回话**。"""
+    """他在折里的判（原文）：会话区评论 + 行内评论，只收 Charlie 账号（user.login）的，去掉续读标记与 agent 的 **回话**。
+    局限：agent 也用 Charlie 的 gh 账号时，login 区分不了人和 agent；靠 **回话** 前缀排除 agent 回复。"""
     items = []
     for kind, path in (("conversation", f"repos/{REPO}/issues/{n}/comments"),
                        ("inline", f"repos/{REPO}/pulls/{n}/comments")):
         for c in gh_pages(path, gh):
             body = (c.get("body") or "").strip()
-            if not body or body.startswith(AUTO_MARKERS):
+            author = (c.get("user") or {}).get("login")
+            if not body or body.startswith(AUTO_MARKERS) or author != CHARLIE:
                 continue
-            items.append({"id": c["id"], "where": kind, "at": c["created_at"],
+            items.append({"id": c["id"], "where": kind, "at": c["created_at"], "author": author,
                           "path": c.get("path"), "body": body[:2000]})
     return sorted(items, key=lambda x: x["at"])
 
@@ -236,8 +243,11 @@ def ingest(data, pr, gh=gh_json, db=None):
     if k in data["jobs"] or k in data["references"]:
         return "dup"
     labels = labels_of(pr)
+    merged_by = (pr.get("merged_by") or {}).get("login")
+    if not merged_by:  # pulls 列表接口不带 merged_by，取单个 PR 详情补上（执行器只认 Charlie 画可）
+        merged_by = ((gh(f"repos/{REPO}/pulls/{pr['number']}") or {}).get("merged_by") or {}).get("login")
     base = {"key": k, "repo": REPO, "pr": pr["number"], "title": pr["title"], "merge_sha": pr["merge_commit_sha"],
-            "merged_at": pr["merged_at"], "merged_by": (pr.get("merged_by") or {}).get("login"),
+            "merged_at": pr["merged_at"], "merged_by": merged_by,
             "labels_at_merge": labels, "detected_at": iso(now())}
     if kind_of(labels) in REFERENCE_KINDS:
         data["references"][k] = {**base, "note": "读物/参考：画可＝读毕，不生成执行单"}
@@ -260,7 +270,119 @@ def ingest(data, pr, gh=gh_json, db=None):
     return "new-job"
 
 
-def scan(since=None, gh=gh_json, db=None, writeback=False):
+# ---------- 门下服务来源（服务模式画可 = POST decisions verdict=approve） ----------
+
+SERVICE = "menxia-service"
+SERVICE_BASE = os.environ.get("MENXIA_SERVICE_BASE", "https://menxia-service.menxia-service.workers.dev")
+SERVICE_TOKEN_FILE = os.path.expanduser(os.environ.get("MENXIA_SERVICE_TOKEN_FILE",
+                                                       "~/.config/menxia-service/runner.token"))
+
+
+def service_token(path=None):
+    """返回 (token, 跳过原因)。文件不存在 / 权限宽于 600 / 空 → 跳过此来源，不报错。"""
+    path = path or SERVICE_TOKEN_FILE
+    if not os.path.exists(path):
+        return None, f"token 不存在 {path}"
+    if os.stat(path).st_mode & 0o077:
+        return None, f"token 权限应为 600 {path}"
+    with open(path, encoding="utf-8") as f:
+        tok = f.read().strip()
+    return (tok, None) if tok else (None, f"token 为空 {path}")
+
+
+def service_http(method, path, token, body=None):
+    """门下服务 API（bearer）。可在测试里替换。"""
+    import urllib.request
+    req = urllib.request.Request(SERVICE_BASE + path, method=method,
+                                 data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                                          "Accept": "application/json", "User-Agent": "menxia-approvals"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return json.loads(r.read() or b"null")
+
+
+def service_key(review_id, decision_id):
+    return f"{SERVICE}#{review_id}@{decision_id}"
+
+
+def ingest_service(data, ev, http, token):
+    """一条 decision.created(approve) 事件 → 'new-job' / 'new-reference' / 'dup'。"""
+    rid, did = ev["review_id"], ev["ref_id"]
+    k = service_key(rid, did)
+    if k in data["jobs"] or k in data["references"]:
+        return "dup"
+    rev = (ev.get("data") or {}).get("revision_no")
+    for j in list(data["jobs"].values()) + list(data["references"].values()):  # 同一 review 同一 revision 重复 approve
+        if j.get("source") == SERVICE and j.get("review_id") == rid and j.get("revision_no") == rev:
+            j.setdefault("duplicate_decisions", [])
+            if did not in j["duplicate_decisions"]:
+                j["duplicate_decisions"].append(did)
+                queue_event(data, f"dup-approve {rid} rev={rev} decision={did} → {j['key']}")
+            return "dup"
+    rv = http("GET", f"/api/v1/reviews/{rid}", token) or {}
+    rv = rv.get("review", rv)
+    labels = [l if isinstance(l, str) else l.get("name") for l in rv.get("labels") or []]
+    qs = rv.get("questions") or []
+    base = {"key": k, "source": SERVICE, "repo": SERVICE, "pr": None, "review_id": rid, "decision_id": did,
+            "title": rv.get("title") or ev.get("review_title"), "merge_sha": None,
+            "revision_no": (ev.get("data") or {}).get("revision_no"),
+            "merged_at": ev["created_at"], "merged_by": None, "web_url": rv.get("web_url"),
+            "labels_at_merge": labels, "detected_at": iso(now())}
+    if kind_of(labels) in REFERENCE_KINDS:
+        data["references"][k] = {**base, "note": "读物/参考：画可＝读毕，不生成执行单"}
+        queue_event(data, f"reference {k}")
+        return "new-reference"
+    decs = http("GET", f"/api/v1/reviews/{rid}/decisions", token) or {}
+    decs = decs.get("items", decs) if isinstance(decs, dict) else decs
+    me = next((d for d in decs or [] if d.get("id") == did), {})
+    data["jobs"][k] = {
+        "decider": me.get("decider") or None,
+        **base, "state": "pending", "state_zh": STATES["pending"],
+        "merge_is_authorization": False, "authorized_scope": None,
+        "pending_decisions": "\n".join(f"{i + 1}) {q.get('text') or q.get('title') or q}" for i, q in enumerate(qs))
+        or None,
+        "destination": None,
+        "decisions": [{"id": d.get("id"), "where": "decision", "at": d.get("created_at"), "path": None,
+                       "body": json.dumps({x: d.get(x) for x in ("verdict", "answers", "note")}, ensure_ascii=False)[:2000]}
+                      for d in decs or []],
+        "owner_session": None, "owner_reason": "门下服务来源，无 Hermes 会话归属",
+        "task_id": None, "evidence": None, "block_reason": None,
+        "history": [{"at": iso(now()), "to": "pending", "by": "scan"}], "event_ids": [], "writeback": None,
+    }
+    queue_event(data, f"job {k} source=menxia-service")
+    return "new-job"
+
+
+def scan_service(data, http=None, token_file=None):
+    """在 scan 的同一把台账锁里扫服务 events。无 token → 跳过并返回一行原因；失败不前移服务游标。"""
+    tok, why = service_token(token_file)
+    if not tok:
+        return f"service: 跳过（{why}）"
+    http = http or service_http
+    cur = data.get("service_cursor")
+    floor = None if cur else now() - BOOTSTRAP  # 首次只收 24 小时内的画可，旧的只推游标
+    res = {"new-job": [], "new-reference": [], "dup": []}
+    try:
+        while True:
+            q = "/api/v1/events?limit=100" + (f"&since={cur}" if cur else "")
+            page = http("GET", q, tok) or {}
+            for ev in page.get("items") or []:
+                if ev.get("type") != "decision.created" or (ev.get("data") or {}).get("verdict") != "approve":
+                    continue
+                if not ev.get("ref_id") or (floor and parse(ev["created_at"]) < floor):
+                    continue
+                res[ingest_service(data, ev, http, tok)].append(ev["review_id"])
+            cur = page.get("next_cursor") or cur
+            if not page.get("has_more"):
+                break
+    except Exception as e:  # noqa: BLE001 — 服务挂了不影响 GitHub 来源；本页之前入账的单保留（幂等键防重）
+        return f"service: FAIL {type(e).__name__}: {str(e)[:200]}"
+    data["service_cursor"] = cur
+    return f"service: new_jobs={res['new-job']} references={res['new-reference']} dup={res['dup']}"
+
+
+def scan(since=None, gh=gh_json, db=None, writeback=False, service=None):
+    """service: None=按 token 文件决定；False=不扫服务；callable=注入的 http 替身。"""
     t0 = now()
     with ledger() as data:
         cur = parse(data["cursor"]) if data["cursor"] else None
@@ -275,6 +397,9 @@ def scan(since=None, gh=gh_json, db=None, writeback=False):
                 new_keys.append(key_of(pr))
         if not since:  # --since 是手动补扫，不动游标
             data["cursor"] = iso(t0)
+        svc_line = None if service is False else scan_service(data, None if service is None else service)
+    if svc_line:
+        log(svc_line)
     if writeback:
         for k in new_keys:
             sync(k, gh)
@@ -357,6 +482,8 @@ def sync(key, gh=None, edit=None):
     gh = gh or gh_json
     with ledger() as data:
         j = dict(data["jobs"][key])
+    if j.get("source") == SERVICE:  # 服务来源没有 GitHub label；状态由服务内评论体现
+        return {"key": key, "state": j["state"], "skipped": "menxia-service 来源无 label 回写"}
     add, rm = want_labels(j["state"])
     cur = set(labels_of(gh(f"repos/{REPO}/pulls/{j['pr']}")))
     to_add, to_rm = sorted(add - cur), sorted(rm & cur)
