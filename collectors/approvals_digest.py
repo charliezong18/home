@@ -29,12 +29,12 @@ def line(job, h):
     if h["to"] == "executing":
         what = f"已接单 {job.get('task_id') or ''}".strip()
     elif h["to"] == "done":
-        what = o.get("summary") or h.get("evidence") or "已完成"
+        what = o.get("summary") or "已完成"  # evidence 里带本机报告路径，不外露
     else:
         what = o.get("summary") or h.get("reason") or "阻塞"
         if h.get("reason") and h["reason"][:60] not in what:
             what += f"（{h['reason'][:120]}）"
-    rep = f"\n  报告：{a['report']}" if a.get("report") and h["to"] != "executing" else ""
+    rep = f"\n  报告：{R.report_ref(job)}" if a.get("report") and h["to"] != "executing" else ""
     return f"- {VERB[h['to']]}：{title}——{what}\n  {R.link(job)}{rep}"
 
 
