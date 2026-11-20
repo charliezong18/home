@@ -339,7 +339,7 @@ def ingest_service(data, ev, http, token):
         "decider": me.get("decider") or None,
         **base, "state": "pending", "state_zh": STATES["pending"],
         "merge_is_authorization": False, "authorized_scope": None,
-        "pending_decisions": "\n".join(f"{i + 1}) {q.get('text') or q.get('title') or q}" for i, q in enumerate(qs))
+        "pending_decisions": "\n".join(f"{i + 1}) {q.get('prompt') or q.get('text') or q.get('title') or q}" for i, q in enumerate(qs))
         or None,
         "destination": None,
         "decisions": [{"id": d.get("id"), "where": "decision", "at": d.get("created_at"), "path": None,
