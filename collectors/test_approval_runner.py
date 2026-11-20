@@ -791,11 +791,14 @@ class TestServiceSource(Base):
                 return pages.pop(0)
             if path.endswith("/decisions"):
                 return {"items": [{"id": "dc_1", "verdict": "approve", "decider": {"id": "u_c", "kind": "user"}}]}
-            return {"title": "服务折", "labels": ["kind:拍板"], "questions": [{"text": "做吗？"}]}
+            return {"title": "服务折", "labels": ["kind:拍板"],
+                    "questions": [{"id": "q1", "prompt": "做吗？", "kind": "single_choice",
+                                   "options": [{"id": "y", "label": "做"}, {"id": "n", "label": "不做"}]}]}
         with A.ledger() as data:
             line = A.scan_service(data, h)
         self.assertIn("new_jobs=['rv_1']", line)
         j = self.jobs()["menxia-service#rv_1@dc_1"]
+        self.assertEqual(j["pending_decisions"], "1) 做吗？")  # 服务端字段叫 prompt，不是整个 dict
         self.assertEqual((j["source"], j["revision_no"], j["decider"]["id"]), ("menxia-service", 2, "u_c"))
         self.assertEqual(A.sync(j["key"])["skipped"], "menxia-service 来源无 label 回写")
 
