@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """门下画可执行台账 → 30 分钟汇报。只打印，不发送（Hermes cron 空输出即静默）。
 
-只报执行器（history.by == "autoexec"）的「开始执行 / 完成 / 卡住」；Hermes 手工推进的不算。
+只报执行器（history.by == "autoexec"）的「开始执行 / 完成 / 卡住」；「更新」单（kind=refresh）报「更新中 / 已更新（第 N 版）/ 没更新成」；Hermes 手工推进的不算。
 游标：$STATE_DIR/digest.json 记每个 key 已汇报到的 history 条数。
 先打印、后推进游标；输出为空不推进。打印本身失败（进程被杀、stdout 断）→ 游标不动，下次重报（宁可重复，不漏报）。
 首次运行（无游标）只报 autoexec_since 之后的变化（未配置则不输出）。
@@ -22,7 +22,27 @@ def cursor_path():
     return os.path.join(A.STATE_DIR, "digest.json")
 
 
+def refresh_link(job):
+    """「更新」单链接：服务 web_url，缺则门下阅读器 ?pr=<rv_id>；绝不给本机路径。"""
+    return job.get("web_url") or f"https://menxia-reader.github.io/menxia/?pr={job.get('review_id')}"
+
+
+def refresh_line(job, h):
+    a = job.get("autoexec") or {}
+    title = job.get("title") or job["key"]
+    if h["to"] == "executing":
+        return f"- 更新中：{title}"
+    if h["to"] == "done":
+        n = a.get("result_revision_no")
+        ver = f"（第 {n} 版）" if n else ""
+        return f"- 已更新：{title}{ver}{refresh_link(job)}"
+    why = (a.get("error") or h.get("reason") or "原因不明")[:200]
+    return f"- 没更新成：{title}——{why}"
+
+
 def line(job, h):
+    if job.get("kind") == "refresh":
+        return refresh_line(job, h)
     a = job.get("autoexec") or {}
     o = a.get("outcome") or {}
     title = job.get("title") or job["key"]
