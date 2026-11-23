@@ -412,9 +412,11 @@ def claim(key):
 
 
 def still_mine(key):
+    """claim 后 launch 前再核：executing/verifying 且 owner、task_id 都是执行器 claim 时写的。
+    task_id 按单种类比对：画可单 ax-…，「更新」单 rf-…（claim_refresh 写的），互不冒充。"""
     j = read_ledger()["jobs"].get(key) or {}
     return (j.get("state") in ("executing", "verifying") and j.get("owner_session") == RUNNER_OWNER
-            and j.get("task_id") == task_id(key))
+            and j.get("task_id") == task_id(key, "rf" if is_refresh(j) else "ax"))
 
 
 # ---------- ① 定范围 ----------
@@ -1392,6 +1394,33 @@ def check_refresh_worker(job, cfg, deps):
     return ""
 
 
+STUCK_REFRESH_ERROR = "执行器内部错误，请重试"
+
+
+def is_stuck_refresh(job):
+    """执行器自己 claim 的「更新」单，autoexec 已 closed 却从没启动 worker、台账仍 executing（旧 still_mine 误判留下的卡死单）。"""
+    a = ax(job)
+    return (is_refresh(job) and job.get("state") == "executing" and job.get("owner_session") == RUNNER_OWNER
+            and job.get("task_id") == task_id(job["key"], "rf") and a.get("phase") == "closed"
+            and not a.get("pid") and not a.get("launched_at"))
+
+
+def recover_stuck_refresh(deps):
+    """卡死的「更新」单：服务端请求 PATCH failed（尽力）→ 台账 blocked（by=autoexec，进 digest）。返回要报的行。"""
+    out = []
+    for job in [j for j in read_ledger()["jobs"].values() if is_stuck_refresh(j)]:
+        key, err = job["key"], STUCK_REFRESH_ERROR
+        try:
+            refresh_patch(job, deps, status="failed", error=err)
+        except Exception as e:  # noqa: BLE001 — 服务回报失败也要解开台账，免得永远卡住
+            err += f"（回报服务 failed 也失败：{str(e)[:100]}）"
+        if read_ledger()["jobs"][key]["state"] == "executing":
+            A.transition(key, "blocked", reason=err, by="autoexec", event_id=f"stuck-refresh-{key}")
+        patch(key, error=err, recovered_at=A.iso(now()))
+        out.append(f"门下更新：未更新 {job.get('title')}——{err} {link(job)}")
+    return out
+
+
 def do_refresh_verify(job, cfg, deps):
     """以服务里的 current_revision_no 为准：比派工前大才算更新成功（worker 自述不算）。"""
     key, a = job["key"], ax(job)
@@ -1451,6 +1480,9 @@ def run_once(cfg, deps=None, dry_run=False):
             fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return ""  # 上一轮还在跑（并发 1）
+        recovered = recover_stuck_refresh(deps)
+        if recovered:  # 本轮只解卡死单并报出来，新单下一轮再开
+            return "\n".join(recovered)
         st = selftest_today(deps)
         cfg = dict(cfg, _selftest_ok=bool(st.get("ok")))
         jobs = read_ledger()["jobs"]
@@ -1506,7 +1538,7 @@ def plan(cfg):
         else:
             picked = True
             out.append(f"  会开始 {j['key'][:60]}「{title}」：原子 claim → 定范围（只读 opus）→ worktree → "
-                       f"hd create {task_id(j['key'])}（沙箱）→ 后台 worker")
+                       f"hd create {task_id(j['key'], 'rf' if is_refresh(j) else 'ax')}（沙箱）→ 后台 worker")
     return "\n".join(out)
 
 
