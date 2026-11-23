@@ -248,7 +248,10 @@ def slug(key):
     head, _, tail = s.rpartition("-")
     if len(tail) == 40:
         s = f"{head}-{tail[:12]}"
-    return s.strip("-.")[:60]
+    s = s.strip("-.")
+    if len(s) > 60:  # 截断会撞车（同一折的多张「更新」单只差末尾）：截到 49 + key 的 hash，按 key 唯一；前 40 字符不变 → task_id 不变
+        s = f"{s[:49].rstrip('-.')}-{hashlib.sha1(key.encode()).hexdigest()[:10]}"
+    return s
 
 
 def task_id(key, prefix="ax"):
@@ -746,9 +749,11 @@ def ensure_dispatch(job, scope, cfg, deps, wt):
     d = work_dir(job["key"])
     path = os.path.join(d, "dispatch.json")
     cached = load_json(path)
+    tid = task_id(job["key"])
+    if cached and cached.get("task_id") != tid:
+        raise StepError(f"dispatch.json 属于别的任务（{cached.get('task_id')}，本单 {tid}），拒绝启动：{path}")
     if cached:
         return cached
-    tid = task_id(job["key"])
     outd = out_dir(job, cfg)
     os.makedirs(outd, exist_ok=True)
     settings = os.path.join(d, "worker.settings.json")
@@ -1348,8 +1353,11 @@ def do_refresh_dispatch(job, cfg, deps):
         job = patch(key, base_revision_no=base_no)
     path = os.path.join(d, "dispatch.json")
     disp = load_json(path)
+    tid = task_id(key, "rf")
+    if disp and disp.get("task_id") != tid:  # 绝不拿别的任务的派工命令启动（旧 bug：slug 撞车复用了上一单的）
+        raise StepError(f"dispatch.json 属于别的任务（{disp.get('task_id')}，本单 {tid}），拒绝启动：{path}")
     if not disp:
-        tid, outd = task_id(key, "rf"), out_dir(job, cfg)
+        outd = out_dir(job, cfg)
         os.makedirs(outd, exist_ok=True)
         settings = os.path.join(d, "worker.settings.json")
         save_json(settings, refresh_settings(outd))
@@ -1379,18 +1387,45 @@ def do_refresh_dispatch(job, cfg, deps):
     return f"门下更新：开始 {job.get('title')}（{disp['task_id']}）{link(job)}"
 
 
+def _tail(path, n=300):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return scrub(f.read()[-4000:])[0].strip()[-n:]
+    except OSError:
+        return ""
+
+
+def worker_diag(disp, d):
+    """worker 起不来/挂了时的现场：退出码、stderr 尾巴、worker.log 尾巴（已擦凭据）。"""
+    parts = []
+    ef = disp.get("exit_file")
+    if ef and os.path.exists(ef):
+        parts.append(f"exit={_tail(ef, 20) or '?'}")
+    err = disp.get("stderr_file") or (disp["output_json"] + ".err" if disp.get("output_json") else "")
+    for label, p in (("stderr", err), ("worker.log", os.path.join(d, "worker.log"))):
+        t = _tail(p) if p else ""
+        if t:
+            parts.append(f"{label}: {t}")
+    return "；".join(parts)
+
+
 def check_refresh_worker(job, cfg, deps):
-    key, a = job["key"], ax(job)
-    disp = load_json(os.path.join(work_dir(key), "dispatch.json")) or {}
+    key, a, d = job["key"], ax(job), work_dir(job["key"])
+    disp = load_json(os.path.join(d, "dispatch.json")) or {}
     if disp.get("exit_file") and os.path.exists(disp["exit_file"]):
-        patch(key, phase="r_verify", worker=evaluate_run(disp).get("summary"))
+        o = evaluate_run(disp)
+        w = o.get("summary") or ""
+        if not o.get("ok"):
+            w = "；".join(x for x in (w, worker_diag(disp, d)) if x)
+        patch(key, phase="r_verify", worker=w)
         return ""
     alive = worker_alive(a, deps)
     if alive and now() - A.parse(a.get("launched_at") or a["started_at"]) < _dt.timedelta(hours=cfg["wall_clock_hours"]):
         return ""
     if alive:
         deps.kill_group(a["pid"])
-    patch(key, phase="r_verify", worker="超时已杀" if alive else "worker 已不在且无退出记录")
+    w = "超时已杀" if alive else "worker 已不在且无退出记录"
+    patch(key, phase="r_verify", worker="；".join(x for x in (w, worker_diag(disp, d)) if x))
     return ""
 
 
@@ -1461,6 +1496,8 @@ def advance(job, cfg, deps):
         out = STEPS[phase](job, cfg, deps) or out
         after = ax(read_ledger()["jobs"][job["key"]]).get("phase")
         if after == before:  # 在等（worker 在跑 / CI 进行中）
+            break
+        if after in ("launched", "r_launched"):  # 刚启动 worker：本轮不查存活，下一轮再判（免得 1 秒内误判死）
             break
     if ax(read_ledger()["jobs"][job["key"]]).get("errors"):
         patch(job["key"], errors=0, last_error=None)
