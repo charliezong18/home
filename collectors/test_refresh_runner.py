@@ -23,9 +23,13 @@ def state(tmp_path, monkeypatch):
     return tmp_path
 
 
+DOCS = ["docs/x.zh-CN.md", "docs/x.en.md"]
+
+
 class FakeService:
-    def __init__(self, revs):
+    def __init__(self, revs, docs=DOCS):
         self.revs = list(revs)  # 每次 GET 详情依次返回的 current_revision_no
+        self.docs = list(docs)
         self.calls = []
 
     def __call__(self, method, path, token, body=None):
@@ -39,7 +43,8 @@ class FakeService:
         if method == "GET" and path == f"/api/v1/reviews/{RID}":
             n = self.revs.pop(0) if len(self.revs) > 1 else self.revs[0]
             return {"title": "会过时的折", "web_url": f"https://x/r/{RID}", "current_revision_no": n,
-                    "decider": {"id": "usr_charlie"}, "labels": []}
+                    "decider": {"id": "usr_charlie"}, "labels": [],
+                    "current_revision": {"revision_no": n, "documents": [{"path": p} for p in self.docs]}}
         if method == "PATCH":
             return {"request_id": REQ, **(body or {})}
         raise AssertionError(f"unexpected {method} {path}")
@@ -53,6 +58,14 @@ class FakeDeps(R.Deps):
         super().__init__()
         self.service_http = svc
         self.alive_tid = alive_tid
+        self.texts, self.fail_paths = [], set()
+
+    def service_text(self, path, token):
+        assert token.startswith("mxa_")
+        self.texts.append(path)
+        if any(path.endswith("/content/" + R.urllib.parse.quote(p)) for p in self.fail_paths):
+            raise OSError("HTTP Error 404: Not Found")
+        return f"原文 {path}"
 
     def selftest(self):
         return {"ok": True, "checks": {}, "detail": "fake"}
@@ -360,3 +373,94 @@ def test_refresh_worker_tools_and_argv():
     assert new[i + 1:j] == tools and "--strict-mcp-config" not in new
     deny = R.refresh_settings(outd)["permissions"]["deny"]
     assert "WebFetch" not in deny and "WebSearch" not in deny and "Bash" in deny
+
+
+# ---------- 回归（真实联调第三轮，2026-11-22）：worker 读不到原文 ----------
+# get_review 只给元数据与文档清单、不含正文，白名单里也没有读正文的 menxia 工具 → worker（正确地）停了。
+# 现在执行器在 launch 前用 mxa_ 令牌拉 v<n> 全部正文到 <outputs>/source/v<n>/<path>，prompt 列出这些路径。
+
+class CtxDeps(LaunchDeps):
+    def hd(self, args):
+        if args[0] == "create":
+            self.context = args[args.index("--context") + 1]
+        return super().hd(args)
+
+
+def _dispatch(state, svc, deps=None):
+    ingest(svc)
+    key = A.refresh_key(RID, REQ)
+    R.claim_refresh(key)
+    deps = deps or CtxDeps(svc, state)
+    c = dict(cfg(outputs_dir=str(state / "out")), _selftest_ok=True)
+    out = R.do_refresh_dispatch(R.read_ledger()["jobs"][key], c, deps)
+    return key, c, deps, out
+
+
+def test_refresh_sources_fetched_and_written(state):
+    svc = FakeService([3])
+    key, c, deps, out = _dispatch(state, svc)
+    src = R.source_dir(R.read_ledger()["jobs"][key], c, 3)
+    assert src == os.path.join(R.out_dir({"key": key}, c), "source", "v3")
+    for p in DOCS:
+        with open(os.path.join(src, p), encoding="utf-8") as f:
+            assert f.read() == f"原文 /api/v1/reviews/{RID}/revisions/3/content/{R.urllib.parse.quote(p)}"
+    assert len(deps.launches) == 1 and out.startswith("门下更新：开始")
+    assert os.path.isdir(os.path.join(R.out_dir({"key": key}, c), "out"))
+
+
+def test_refresh_prompt_lists_source_paths(state):
+    svc = FakeService([3])
+    key, c, deps, _ = _dispatch(state, svc)
+    outd = R.out_dir({"key": key}, c)
+    for p in DOCS:
+        assert f"`{os.path.join(outd, 'source', 'v3', p)}`" in deps.context
+    assert os.path.join(outd, "out") + "/<同路径>" in deps.context
+    assert "Glob" not in deps.context and "全部文档" in deps.context
+    # prompt 函数本身：列出每个 source 路径
+    b = R.refresh_brief({"key": key, "title": "t", "review_id": RID, "request_id": REQ, "source": A.SERVICE}, c, 7,
+                        ["docs/a.md"])
+    assert os.path.join(outd, "source", "v7", "docs/a.md") in b
+
+
+@pytest.mark.parametrize("bad", ["../escape.md", "docs/../../x.md", "/etc/passwd", "docs//x.md", "docs\\x.md", ""])
+def test_refresh_traversal_path_rejected(state, bad):
+    assert R.safe_doc_path(bad) is None
+    svc = FakeService([3], docs=["docs/ok.md", bad])
+    key, c, deps, out = _dispatch(state, svc)
+    assert deps.launches == [] and deps.texts == []  # 一篇都不拉、不启动
+    j = R.read_ledger()["jobs"][key]
+    assert j["state"] == "blocked" and j["autoexec"]["phase"] == "closed"
+    last = svc.patches()[-1]
+    assert last["status"] == "failed" and "不安全" in last["error"]
+    assert not os.path.exists(os.path.join(str(state), "escape.md"))
+
+
+def test_safe_doc_path_accepts_normal():
+    assert R.safe_doc_path("docs/x.zh-CN.md") == "docs/x.zh-CN.md"
+
+
+def test_refresh_fetch_failure_no_launch_and_failed(state):
+    svc = FakeService([3])
+    deps = CtxDeps(svc, state)
+    deps.fail_paths = {"docs/x.en.md"}
+    key, c, deps, out = _dispatch(state, svc, deps)
+    assert deps.launches == []
+    assert not os.path.exists(os.path.join(R.work_dir(key), "dispatch.json"))
+    last = svc.patches()[-1]
+    assert last["status"] == "failed" and "docs/x.en.md" in last["error"] and "拉取原文失败" in last["error"]
+    j = R.read_ledger()["jobs"][key]
+    assert j["state"] == "blocked" and j["autoexec"]["phase"] == "closed" and "docs/x.en.md" in j["autoexec"]["error"]
+    assert out.startswith("门下更新：未更新")
+
+
+def test_refresh_base_moved_no_launch(state):
+    """台账记的 base 是 v3，服务里已是 v4：不拉 v4 冒充 v3，直接 failed。"""
+    svc = FakeService([4])
+    ingest(svc)
+    key = A.refresh_key(RID, REQ)
+    R.claim_refresh(key)
+    R.patch(key, base_revision_no=3)
+    deps = CtxDeps(svc, state)
+    R.do_refresh_dispatch(R.read_ledger()["jobs"][key], dict(cfg(outputs_dir=str(state / "out")), _selftest_ok=True),
+                          deps)
+    assert deps.launches == [] and "v4" in svc.patches()[-1]["error"]
