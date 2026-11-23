@@ -374,6 +374,37 @@ def ingest_service(data, ev, http, token):
     return "new-job"
 
 
+def refresh_key(review_id, request_id):
+    return f"{SERVICE}#{review_id}@refresh:{request_id}"
+
+
+def ingest_refresh(data, ev, http, token):
+    """一条 refresh.requested 事件（门下「更新」按钮，服务 D-19）→ kind=refresh 的待接手单；'new-job' / 'dup'。
+    不定范围：消费者 approval_runner.py 直接派 worker 重写该折。"""
+    rid = ev["review_id"]
+    req = (ev.get("data") or {}).get("request_id") or ev.get("ref_id")
+    k = refresh_key(rid, req)
+    if k in data["jobs"]:
+        return "dup"
+    rv = http("GET", f"/api/v1/reviews/{rid}", token) or {}
+    items = (http("GET", f"/api/v1/reviews/{rid}/refresh-requests", token) or {}).get("items") or []
+    me = next((x for x in items if x.get("request_id") == req), {})
+    data["jobs"][k] = {
+        "key": k, "kind": "refresh", "source": SERVICE, "repo": SERVICE, "pr": None, "review_id": rid,
+        "request_id": req, "note": me.get("note"), "title": rv.get("title") or ev.get("review_title"),
+        "web_url": rv.get("web_url"), "revision_no_at_request": rv.get("current_revision_no"),
+        "decider": rv.get("decider") or None, "merge_sha": None, "merged_at": ev["created_at"], "merged_by": None,
+        "labels_at_merge": [l if isinstance(l, str) else l.get("name") for l in rv.get("labels") or []],
+        "detected_at": iso(now()), "state": "pending", "state_zh": STATES["pending"],
+        "merge_is_authorization": False, "authorized_scope": None, "pending_decisions": None, "destination": None,
+        "decisions": [], "owner_session": None, "owner_reason": "门下「更新」请求，无 Hermes 会话归属",
+        "task_id": None, "evidence": None, "block_reason": None,
+        "history": [{"at": iso(now()), "to": "pending", "by": "scan"}], "event_ids": [], "writeback": None,
+    }
+    queue_event(data, f"job {k} kind=refresh")
+    return "new-job"
+
+
 def scan_service(data, http=None, token_file=None):
     """在 scan 的同一把台账锁里扫服务 events。无 token → 跳过并返回一行原因；失败不前移服务游标。"""
     tok, why = service_token(token_file)
@@ -388,11 +419,12 @@ def scan_service(data, http=None, token_file=None):
             q = "/api/v1/events?limit=100" + (f"&since={cur}" if cur else "")
             page = http("GET", q, tok) or {}
             for ev in page.get("items") or []:
-                if ev.get("type") != "decision.created" or (ev.get("data") or {}).get("verdict") != "approve":
+                is_refresh = ev.get("type") == "refresh.requested"
+                if not is_refresh and (ev.get("type") != "decision.created" or (ev.get("data") or {}).get("verdict") != "approve"):
                     continue
                 if not ev.get("ref_id") or (floor and parse(ev["created_at"]) < floor):
                     continue
-                res[ingest_service(data, ev, http, tok)].append(ev["review_id"])
+                res[(ingest_refresh if is_refresh else ingest_service)(data, ev, http, tok)].append(ev["review_id"])
             cur = page.get("next_cursor") or cur
             if not page.get("has_more"):
                 break
