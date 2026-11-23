@@ -259,6 +259,96 @@ def test_stuck_recovery_ignores_job_owned_by_others(state):
     assert R.read_ledger()["jobs"][key]["state"] == "executing"
 
 
+# ---------- 回归（真实联调第二轮，2026-11-22）：refresh worker 启动即死 ----------
+# 线上 key 很长，slug 截到 60 字符后同一折的不同「更新」请求共用 work_dir/out_dir → 复用上一张单的 dispatch.json
+# （旧 task_id c3717fdd05）→ 跑起来的是旧单的命令，台账记的却是新 task_id → worker_alive 判死；且 launch 与
+# check 在同一轮 advance 里连跑，1 秒内就判 failed。
+LONG_RID = "rv_01M77A6P283ZG4N2EKHZXC5QRS"
+LONG_REQ1, LONG_REQ2 = "rfr_01M7ZZZZZZZZZZZZZZZZZZZZZZ", "rfr_01M83CWC2WJ2KY24JQ4T24KHTP"
+
+
+def test_long_refresh_keys_same_review_get_distinct_dirs(state):
+    k1, k2 = A.refresh_key(LONG_RID, LONG_REQ1), A.refresh_key(LONG_RID, LONG_REQ2)
+    assert R.slug(k1) != R.slug(k2) and len(R.slug(k2)) <= 60
+    assert R.work_dir(k1) != R.work_dir(k2)
+    c = cfg(outputs_dir="/tmp/o")
+    assert R.out_dir({"key": k1}, c) != R.out_dir({"key": k2}, c)
+    # task_id 不受影响（向后兼容：已在台账里的 task_id 照样对得上）
+    assert R.task_id(k2, "rf") == "rf-menxia-service-rv_01M77A6P283ZG4N2EKHZXC-c9abdded70"
+    # 短 key 的 slug 不变（在办单的 work_dir 不搬家）
+    assert R.slug("charliezong18/review#214@" + "2de83f50b578" + "0" * 28) == "review-214-2de83f50b578"
+
+
+def test_stale_dispatch_of_other_task_is_not_launched(state):
+    """work_dir 里留着别的任务的 dispatch.json（task_id 不是本单）→ 绝不拿它启动。"""
+    svc = FakeService([3])
+    ingest(svc)
+    key = A.refresh_key(RID, REQ)
+    R.claim_refresh(key)
+    R.save_json(os.path.join(R.work_dir(key), "dispatch.json"),
+                {"task_id": "rf-old-c3717fdd05", "command": "claude rf-old-c3717fdd05", "argv": [],
+                 "exit_file": "/nonexistent.exit"})
+    deps = LaunchDeps(svc, state)
+    with pytest.raises(R.StepError, match="dispatch.json"):
+        R.do_refresh_dispatch(R.read_ledger()["jobs"][key], dict(cfg(outputs_dir=str(state / "out")), _selftest_ok=True), deps)
+    assert deps.launches == []
+
+
+def test_launch_round_does_not_judge_worker_dead(state):
+    """launch 的那一轮不检查存活：哪怕 ps 还看不到 worker，也停在 r_launched，不 PATCH failed。"""
+    svc = FakeService([3])
+    ingest(svc)
+    key = A.refresh_key(RID, REQ)
+    _selftest_ok()
+    deps = LaunchDeps(svc, state)  # alive_tid=None：ps 看不到
+    out = R.run_once(cfg(outputs_dir=str(state / "out")), deps)
+    j = R.read_ledger()["jobs"][key]
+    disp = R.load_json(os.path.join(R.work_dir(key), "dispatch.json"))
+    assert len(deps.launches) == 1 and disp["task_id"] == j["autoexec"]["task_id"] == j["task_id"] == R.task_id(key, "rf")
+    assert j["autoexec"]["phase"] == "r_launched", j["autoexec"]
+    assert "failed" not in [p.get("status") for p in svc.patches()]
+    assert out.startswith("门下更新：开始")
+
+
+def test_dead_worker_records_exit_code_and_stderr(state):
+    """worker 起不来：退出码与 stderr / worker.log 尾巴写进台账 worker 与 error。"""
+    svc = FakeService([3, 3])
+    ingest(svc)
+    key = A.refresh_key(RID, REQ)
+    _selftest_ok()
+    deps = LaunchDeps(svc, state)
+    R.run_once(cfg(outputs_dir=str(state / "out")), deps)
+    disp = R.load_json(os.path.join(R.work_dir(key), "dispatch.json"))
+    os.makedirs(os.path.dirname(disp["exit_file"]), exist_ok=True)
+    with open(disp["exit_file"], "w") as f:
+        f.write("127\n")
+    with open(disp["exit_file"].replace(".json.exit", ".json.err"), "w") as f:
+        f.write("bash: claude: command not found\n")
+    with open(os.path.join(R.work_dir(key), "worker.log"), "w") as f:
+        f.write("cron.env missing\n")
+    R.run_once(cfg(outputs_dir=str(state / "out")), deps)
+    j = R.read_ledger()["jobs"][key]
+    a = j["autoexec"]
+    assert a["phase"] == "closed"
+    for s in ("127", "command not found", "cron.env missing"):
+        assert s in a["worker"] and s in a["error"], (s, a)
+    assert "command not found" in svc.patches()[-1]["error"]
+
+
+def test_vanished_worker_without_exit_records_log_tail(state):
+    svc = FakeService([3, 3])
+    ingest(svc)
+    key = A.refresh_key(RID, REQ)
+    _selftest_ok()
+    deps = LaunchDeps(svc, state)
+    R.run_once(cfg(outputs_dir=str(state / "out")), deps)
+    with open(os.path.join(R.work_dir(key), "worker.log"), "w") as f:
+        f.write("Error: not logged in\n")
+    R.run_once(cfg(outputs_dir=str(state / "out")), deps)
+    a = R.read_ledger()["jobs"][key]["autoexec"]
+    assert "worker 已不在且无退出记录" in a["worker"] and "not logged in" in a["worker"] and "not logged in" in a["error"]
+
+
 def test_refresh_worker_tools_and_argv():
     outd = "/tmp/rf-out"
     tools = R.refresh_tools(outd)
