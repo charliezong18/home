@@ -850,6 +850,37 @@ class TestDigest(Base):
         self.assertNotIn("/Users/", out)
         self.assertNotIn("开始执行", out)
 
+    def _refresh_job(self, to, **extra):
+        hist = [{"at": "2026-11-18T10:00:00Z", "to": "pending", "by": "scan"},
+                {"at": "2026-11-18T10:05:00Z", "to": "executing", "by": "autoexec"}]
+        if to != "executing":
+            hist.append(dict({"at": "2026-11-18T10:20:00Z", "to": to, "by": "autoexec"}, **extra.pop("h", {})))
+        return {"key": "menxia-service#rv_5@refresh:rq_1", "kind": "refresh", "source": "menxia-service",
+                "review_id": "rv_5", "title": "某文档", "state": to, "history": hist,
+                "autoexec": dict({"kind": "refresh", "report": "/Users/x/RESULT.md"}, **extra)}
+
+    def test_refresh_lines(self):
+        self.seed(self._refresh_job("executing"))
+        out, _ = D.digest(self.cfg)
+        self.assertIn("更新中：某文档", out)
+        self.assertNotIn("/Users/", out)
+
+        self.seed(self._refresh_job("done", result_revision_no=3))
+        out, _ = D.digest(self.cfg)
+        self.assertIn("已更新：某文档（第 3 版）https://menxia-reader.github.io/menxia/?pr=rv_5", out)
+        self.assertNotIn("/Users/", out)
+        self.assertNotIn("报告：", out)
+
+        j = self._refresh_job("done", result_revision_no=2)
+        j["web_url"] = "https://svc.example/reviews/rv_5"
+        self.seed(j)
+        self.assertIn("（第 2 版）https://svc.example/reviews/rv_5", D.digest(self.cfg)[0])
+
+        self.seed(self._refresh_job("blocked", error="没有新版本（派工前 v1，现在 v1）", h={"reason": "r"}))
+        out, _ = D.digest(self.cfg)
+        self.assertIn("没更新成：某文档——没有新版本", out)
+        self.assertNotIn("/Users/", out)
+
 
 if __name__ == "__main__":
     unittest.main()
