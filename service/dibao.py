@@ -47,7 +47,7 @@ TODO_ACTIONS = os.path.join(DATA_DIR, "todo-actions.jsonl")
 DUE_SCAN_AT = (7, 30)                    # 本地时间；晚于此启动则当天补扫一次（键里带日期，不会重复推）
 MAX_BODY = 64 * 1024
 EDIT_RETRY_SECS = 2 * 3600               # worker 报 retry（vault 暂时性 OSError）从首次失败起持续这么久仍失败才记 failed（L1：按时间不按轮）
-MERGE_ATTRS = ("*.jsonl merge=union", "home.json merge=ours", "status.json merge=ours")
+MERGE_ATTRS = ("*.jsonl merge=union", "home.json merge=ours", "status.json merge=ours", "usage.json merge=ours")
 log = logging.getLogger("dibao")
 CONFLICT_RE = re.compile(r"^\+(<{7}|={7}|>{7})(?:\s|$)", re.M)
 

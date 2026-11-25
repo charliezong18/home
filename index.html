@@ -29,6 +29,7 @@
     <button type="button" role="tab" data-tab="folders">折务</button>
     <button type="button" role="tab" data-tab="projects">项目</button>
     <button type="button" role="tab" data-tab="reading">读物</button>
+    <button type="button" role="tab" data-tab="usage">用量</button>
   </nav>
 </header>
 
@@ -89,6 +90,26 @@
       <p class="empty"><b>订阅还没接入</b>RSS 与 TrendRadar 在 Phase 3 接入；先把链接转给 Hermes，会出现在上面。</p>
     </section>
   </div>
+
+  <!-- 用量：home-data 的 usage.json（collectors/collect_usage.py）；只有数字和 task id -->
+  <section class="usage" data-panel="usage" aria-labelledby="h-usage">
+    <h2 class="sec" id="h-usage">用量 <small><span id="u-fresh" class="u-fresh"></span></small></h2>
+    <p class="empty" id="u-empty" hidden></p>
+    <div id="u-body">
+      <div class="u-today" id="u-today"></div>
+      <h3 class="sub">近 7 天 <span class="muted">点柱子看那天</span></h3>
+      <div class="u-bars" id="u-bars" role="list"></div>
+      <div class="u-legend" id="u-legend"></div>
+      <h3 class="sub">模型占比 <span id="u-day-m"></span></h3>
+      <div id="u-models"></div>
+      <h3 class="sub">最贵任务 Top 10 <span id="u-day-t"></span></h3>
+      <div id="u-top"></div>
+      <h3 class="sub">浪费信号</h3>
+      <div id="u-waste"></div>
+      <h3 class="sub">失败 / 拒绝</h3>
+      <div id="u-fail"></div>
+    </div>
+  </section>
 </main>
 
 <footer class="foot">

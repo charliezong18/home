@@ -298,3 +298,18 @@ git -C ~/Developer/review worktree remove ~/Developer/review-home-data
 尚未实现。计划：在 `home-data` 分支 `config.yaml` 的 `rss:` 下加 `- { name, url }`，由将来的
 `collectors/collect_rss.py` 每天两次读最近 48 小时标题，以 `source: "rss"` 追加进 `readings.jsonl`。
 Phase 2（Backlog / 倒数日 / 日历 / 账单快递，账单不存金额）同样尚未实现，页面上已留占位。
+
+## 用量 tab（usage.json，MVP）
+
+设计稿：门下「每日 Token 用量看板」（`.scratch/usage/token-dashboard-full.zh-CN.md` §3.1–3.3，未入库）。
+
+- `collectors/usage_data.py`（P1，只读、纯标准库）：`hermes-dispatch/data/runs/*.json` + `ledger.json`（只取 template/model/时间）+
+  `~/.hermes/state.db`（`mode=ro`）→ 统一 rows（day[洛杉矶]、source、model、task_id、cost_usd、tokens、turns、denials、subtype…）。
+  heartbeat = cron 会话标题含「巡检」或以 jobs.json 里 `e8319478c051` 的 name 开头；标题判断与 `[SILENT]` 判断都在 SQL 里做，正文不进 Python。
+  telegram/desktop 长会话按当天 assistant 消息数占比摊总成本（近似）。`python3 collectors/usage_data.py --day 2026-11-23`
+- `collectors/collect_usage.py`（P2）：rows → `usage.json`（30 天滚动，新的在前；schema 同设计稿 §3.2，另有 `failures.ids`、`waste[].ids`）。
+  规则：R-CRON-IDLE（巡检回 [SILENT]）、R-RESUME-HEAVY（单任务新写缓存 ≥200k 且回合 ≤10）、R-MAXTURNS、R-DENY；R-REFETCH / R-REREAD 待做。
+  `quota` 恒为 `source: "none"`（页面显示「额度待标定」）。`--dry-run [--day D]` 只打印。
+- 接入：`run_all.sh` / `service/dibao_sched.py` 多一个源 `usage` → 存 `snapshot-usage.json`；`build_home.py` 把它写成 home-data 的 `usage.json`
+  一起提交（去掉 `generated` 后不变就不算内容变）；`usage.json merge=ours`。
+- 页面：「用量」tab，`?tab=usage` 深链，`?demo=1` 夹具；usage.json 单独读，404 时只在该 tab 提示。数据超过 2 小时变灰 ⚠。

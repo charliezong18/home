@@ -24,6 +24,13 @@ const READINGS_PATH = '/repos/charliezong18/review/contents/readings.jsonl';
 // 今日待办勾完成 / 撤销：同一条路追加到 home-data 的 todo-actions.jsonl；Mac mini 的 dibao 每分钟拉回，执行 gog tasks done|undo 后重采
 const TODO_ACTIONS_PATH = '/repos/charliezong18/review/contents/todo-actions.jsonl';
 const UNDO_MS = 6000;
+// 用量 tab：home-data 的 usage.json（collectors/collect_usage.py 每 30 分钟），只有数字和 task id
+const USAGE_PATH = '/repos/charliezong18/review/contents/usage.json?ref=home-data';
+const USAGE_STALE_H = 2;
+const USAGE_SRC = [['worker', 'worker'], ['hermes_cron_heartbeat', '巡检'], ['hermes_cron_other', '其他 cron'], ['hermes_main', '主会话'], ['hermes_local', 'local']];
+const WASTE_LABEL = { 'R-CRON-IDLE': '巡检空转（回 [SILENT]）', 'R-RESUME-HEAVY': '重灌上下文只做一点事', 'R-MAXTURNS': '撞回合上限', 'R-DENY': '权限被拒', 'R-REFETCH': '重复抓网页', 'R-REREAD': '重复读大文件' };
+let lastUsage = null;
+let usageSel = null;   // 选中的日期（点 7 天柱切换）；null = 最新一天
 const DEMO = new URLSearchParams(location.search).has('demo');
 const TIER = { now: 'now', build: 'build', learn: 'learn', ice: 'ice' };
 const STATUS = { active: '推进中', waiting: '等别人', you: '卡在你', ice: '冷冻', done: '完成' };
@@ -138,6 +145,8 @@ async function load() {
     $('grid').hidden = false;
     lastData = demoData();
     render(lastData);
+    lastUsage = demoUsage();
+    renderUsage(lastUsage);
     return handleDeepLink(lastData);
   }
   const token = getToken();
@@ -164,6 +173,138 @@ async function load() {
   render(data);
   setStatus('');
   handleDeepLink(data);
+  loadUsage(token);
+}
+
+// usage.json 独立读：失败只影响用量 tab，不打扰主页
+async function loadUsage(token) {
+  try {
+    const res = await fetch(API + USAGE_PATH, {
+      cache: 'no-store',
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github.raw+json', 'X-GitHub-Api-Version': '2022-11-28' },
+    });
+    if (res.status === 404) { lastUsage = null; return renderUsage(null, '还没有用量数据：Mac mini 的 dibao 跑过 collect_usage 后出现。'); }
+    if (!res.ok) return renderUsage(lastUsage, `读 usage.json 失败：GitHub ${res.status}`);
+    lastUsage = await res.json();
+    renderUsage(lastUsage);
+  } catch (e) {
+    renderUsage(lastUsage, `读 usage.json 失败：${e.message}`);
+  }
+}
+
+const usd = (x) => `$${(+x || 0).toFixed((+x || 0) >= 100 ? 0 : (+x || 0) >= 10 ? 1 : 2)}`;
+const tokM = (x) => `${(+x || 0).toFixed(1)}M`;
+const hermesCost = (d) => USAGE_SRC.filter(([k]) => k !== 'worker').reduce((s, [k]) => s + (+((d.by_source || {})[k] || {}).cost_usd || 0), 0);
+
+// 用量 tab 渲染：全部 textContent / CSSOM，不拼 HTML
+function renderUsage(u, err) {
+  const emptyEl = $('u-empty');
+  const body = $('u-body');
+  const days = (u && Array.isArray(u.days)) ? u.days.filter((d) => d && typeof d.date === 'string') : [];
+  emptyEl.hidden = !err && days.length > 0;
+  emptyEl.textContent = err || (days.length ? '' : '用量数据为空。');
+  body.hidden = !days.length;
+  const fresh = $('u-fresh');
+  if (!days.length) { fresh.textContent = ''; return; }
+  const hours = u.generated ? (Date.now() - new Date(u.generated)) / 3600000 : Infinity;
+  fresh.textContent = `数据更新于 ${u.generated ? ago(u.generated) : '未知'}${hours > USAGE_STALE_H ? ' ⚠' : ''}`;
+  fresh.title = `usage.json generated ${u.generated || '未知'}`;
+  fresh.classList.toggle('stale', hours > USAGE_STALE_H);
+  const d = days.find((x) => x.date === usageSel) || days[0];
+  const isLatest = d === days[0];
+  const tot = d.total || {};
+  const worker = +((d.by_source || {}).worker || {}).cost_usd || 0;
+  const q = u.quota || {};
+  const quota = Number.isFinite(+q.seven_day_pct) && q.seven_day_pct != null
+    ? `周额度 7d：${Math.round(+q.seven_day_pct)}%${q.resets_at ? `（重置 ${String(q.resets_at).slice(5, 16).replace('T', ' ')}）` : ''}`
+    : '额度待标定';
+  $('u-today').replaceChildren(
+    h('div', { class: 'kicker' }, `${isLatest ? '今日' : md(d.date)} · 订阅等价（API 价目估算）`),
+    h('div', { class: 'u-big' }, h('b', {}, usd(tot.cost_usd)), h('span', {}, ` / ${tokM(tot.tokens_m)} token`)),
+    h('p', { class: 'u-split' }, `Hermes ${usd(hermesCost(d))} · worker ${usd(worker)} · ${tot.runs || 0} 个任务 · ${tot.sessions || 0} 个 cron/local 会话`),
+    h('p', { class: `u-quota${quota === '额度待标定' ? ' muted' : ''}` }, quota),
+    u.week ? h('p', { class: 'u-split muted' }, `本周 ${u.week.iso || ''} ${usd(u.week.cost_usd)}${u.week.vs_last_week_pct != null ? `（比上周同期 ${u.week.vs_last_week_pct > 0 ? '+' : ''}${u.week.vs_last_week_pct}%）` : ''}${+u.week.fable_cost_usd ? ` · Fable ${usd(u.week.fable_cost_usd)}` : ''}`) : null);
+
+  // 近 7 天堆叠柱（旧→新，左→右）：高度按 7 天最大值归一，段高用 CSSOM 赋值（CSP style-src 'self'）
+  const week = days.slice(0, 7).reverse();
+  const max = Math.max(0.01, ...week.map((x) => +(x.total || {}).cost_usd || 0));
+  $('u-bars').replaceChildren(...week.map((x) => {
+    const stack = h('div', { class: 'u-stack' });
+    for (const [k] of USAGE_SRC) {
+      const c = +((x.by_source || {})[k] || {}).cost_usd || 0;
+      if (c <= 0) continue;
+      const seg = h('i', { class: `u-s-${k}` });
+      seg.style.height = `${(c / max) * 100}%`;
+      stack.append(seg);
+    }
+    return h('button', { type: 'button', role: 'listitem', class: `u-col${x === d ? ' sel' : ''}`, 'aria-label': `${x.date} ${usd((x.total || {}).cost_usd)}`,
+      onclick: () => { usageSel = x.date; renderUsage(lastUsage); } },
+    h('span', { class: 'u-v' }, usd((x.total || {}).cost_usd)), stack, h('span', { class: 'u-d' }, md(x.date)));
+  }));
+  $('u-legend').replaceChildren(...USAGE_SRC.map(([k, l]) => h('span', {}, h('i', { class: `u-s-${k}`, 'aria-hidden': 'true' }), l)));
+
+  // 模型占比
+  const models = Object.entries(d.by_model || {}).filter(([, v]) => v && +v.cost_usd > 0);
+  const mt = models.reduce((s, [, v]) => s + +v.cost_usd, 0) || 1;
+  $('u-day-m').textContent = md(d.date);
+  $('u-models').replaceChildren(...(models.length ? models.map(([m, v]) => {
+    const fill = h('i', {});
+    fill.style.width = `${(+v.cost_usd / mt) * 100}%`;
+    return h('div', { class: 'u-model' },
+      h('div', { class: 'n' }, h('span', {}, m), h('span', { class: 'v' }, `${usd(v.cost_usd)} · ${Math.round((+v.cost_usd / mt) * 100)}% · ${tokM(v.tokens_m)}`)),
+      h('div', { class: 'bar', 'aria-hidden': 'true' }, fill));
+  }) : [empty('这天没有用量。')]));
+
+  // Top 10（worker 任务）：task_id 可点复制，粘给 Hermes 问「这个为什么贵」
+  $('u-day-t').textContent = md(d.date);
+  const top = Array.isArray(d.top_tasks) ? d.top_tasks.slice(0, 10) : [];
+  $('u-top').replaceChildren(...(top.length ? top.map((t) => h('div', { class: 'row wide u-task' },
+    idBtn(String(t.task_id || ''), 'k'),
+    h('span', { class: 't' }, [t.model, `${t.turns ?? 0} 回合`, t.denials ? `拒 ${t.denials}` : '', t.subtype && t.subtype !== 'success' ? t.subtype : ''].filter(Boolean).join(' · ')),
+    h('span', { class: 'v' }, usd(t.cost_usd)))) : [empty('这天没有 worker 任务。')]));
+
+  // 浪费信号
+  const waste = Array.isArray(d.waste) ? d.waste : [];
+  $('u-waste').replaceChildren(...(waste.length ? waste.map((w) => h('div', { class: 'row wide' },
+    h('span', { class: 'k' }, String(w.rule || '')),
+    h('span', { class: 't' }, `${WASTE_LABEL[w.rule] || ''} · ${w.count ?? 0} 次${Array.isArray(w.ids) && w.ids.length ? ` · ${w.ids.slice(0, 3).join(', ')}` : ''}`),
+    h('span', { class: 'v' }, w.cost_usd != null ? usd(w.cost_usd) : '—'))) : [empty('这天没有命中浪费规则。')]),
+  h('p', { class: 'more muted' }, 'R-REFETCH / R-REREAD（重复抓网页 / 重读大文件）待接入。'));
+
+  // 失败 / 拒绝
+  const f = d.failures || {};
+  const ids = Array.isArray(f.ids) ? f.ids : [];
+  const kindText = { error_max_turns: '撞回合上限', permission_denials: '权限被拒', exit_nonzero: '非零退出' };
+  $('u-fail').replaceChildren(
+    h('p', { class: 'u-split' }, `max_turns ${f.error_max_turns || 0} · 拒绝 ${f.permission_denials || 0} 次 · exit≠0 ${f.exit_nonzero || 0}`),
+    ...ids.map((x) => h('div', { class: 'row wide' }, idBtn(String(x.task_id || ''), 'k'),
+      h('span', { class: 't' }, `${kindText[x.kind] || x.kind || ''}${x.count ? ` ×${x.count}` : ''}${x.code != null ? ` (exit ${x.code})` : ''}`), h('span', { class: 'v' }, ''))));
+}
+
+// ?demo=1 用量夹具：虚构数字，不读网络
+function demoUsage() {
+  const day = (n) => { const x = new Date(); x.setDate(x.getDate() - n); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`; };
+  const days = [...Array(30)].map((_, i) => {
+    const w = [36, 41, 52, 1, 38, 79, 4][i % 7] * (i < 7 ? 1 : 0.8);
+    const hb = 24 + (i % 3);
+    const o = 3 + (i % 2);
+    const m = i % 4 ? 0 : 6;
+    return {
+      date: day(i),
+      total: { cost_usd: w + hb + o + m, tokens_m: (w + hb + o + m) * 1.2, runs: Math.round(w / 1.5), sessions: 50 },
+      by_source: { worker: { cost_usd: w, runs: Math.round(w / 1.5) }, hermes_cron_heartbeat: { cost_usd: hb, sessions: 47 },
+        hermes_cron_other: { cost_usd: o, sessions: 3 }, hermes_main: { cost_usd: m, turns: m ? 40 : 0 }, hermes_local: { cost_usd: 0, sessions: 0 } },
+      by_model: { 'opus-5-5': { cost_usd: (w + hb + o + m) * 0.8, tokens_m: 70 }, 'fable-5-1': { cost_usd: (w + hb + o + m) * 0.13, tokens_m: 3.5 },
+        'sonnet-5-5': { cost_usd: (w + hb + o + m) * 0.06, tokens_m: 6 }, 'haiku-5-5': { cost_usd: 0.2, tokens_m: 0.3 } },
+      turns: 900,
+      failures: { error_max_turns: 1, permission_denials: 4, exit_nonzero: 0, ids: [{ task_id: 'demo-max-turns', kind: 'error_max_turns' }, { task_id: 'demo-denied', kind: 'permission_denials', count: 4 }] },
+      top_tasks: [...Array(10)].map((__, k) => ({ task_id: `demo-task-${k + 1}`, model: k < 3 ? 'fable-5-1' : 'opus-5-5', cost_usd: 6 - k * 0.5, turns: 30 + k, denials: k === 1 ? 4 : 0, template: 'build', subtype: k === 2 ? 'error_max_turns' : 'success' })),
+      waste: [{ rule: 'R-CRON-IDLE', count: 43, cost_usd: hb - 2 }, { rule: 'R-RESUME-HEAVY', count: 1, cost_usd: 4.2, ids: ['demo-task-4'] }, { rule: 'R-DENY', count: 4, cost_usd: 5.5, ids: ['demo-denied'] }],
+      billing_api_runs: 0,
+    };
+  });
+  return { schema: 1, generated: new Date().toISOString(), quota: { seven_day_pct: null, resets_at: null, five_hour_pct: null, source: 'none', as_of: null },
+    days, week: { iso: '2026-W48', cost_usd: 420, vs_last_week_pct: -12, fable_cost_usd: 30 } };
 }
 
 function srcBadge(data, name) {
@@ -810,7 +951,7 @@ document.addEventListener('visibilitychange', () => { if (document.visibilitySta
 
 // 手机左右滑切 tab
 let x0 = null;
-const TABS = ['today', 'folders', 'projects', 'reading'];
+const TABS = ['today', 'folders', 'projects', 'reading', 'usage'];
 document.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; }, { passive: true });
 document.addEventListener('touchend', (e) => {
   if (x0 == null || window.matchMedia('(min-width: 700px)').matches) return;
@@ -823,16 +964,17 @@ document.addEventListener('touchend', (e) => {
 // 弹窗关闭（×、点遮罩、Esc 都会触发 close）→ 清掉地址栏的 ?id=
 $('proj-dialog').addEventListener('close', () => setUrlId(null));
 
-// 键盘：1–4 切 tab，r 刷新；输入框聚焦或弹窗打开时不触发
+// 键盘：1–5 切 tab，r 刷新；输入框聚焦或弹窗打开时不触发
 document.addEventListener('keydown', (e) => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const t = e.target;
   if (t && (['INPUT', 'TEXTAREA', 'SELECT'].includes(t.tagName) || t.isContentEditable)) return;
   if ($('proj-dialog').open) return;
-  if (/^[1-4]$/.test(e.key)) setTab(TABS[+e.key - 1]);
+  if (/^[1-5]$/.test(e.key)) setTab(TABS[+e.key - 1]);
   else if (e.key === 'r') load();
 });
 
 const stored = (() => { try { return localStorage.getItem(TAB_KEY); } catch { return null; } })();
-setTab(new URLSearchParams(location.search).has('id') ? 'today' : (TABS.includes(stored) ? stored : 'today'));
+const tabParam = new URLSearchParams(location.search).get('tab');   // ?tab=usage 深链（Telegram 里的看板链接）
+setTab(TABS.includes(tabParam) ? tabParam : new URLSearchParams(location.search).has('id') ? 'today' : (TABS.includes(stored) ? stored : 'today'));
 load();

@@ -194,6 +194,37 @@ dialog p { margin-top: var(--s2); }
 .pe-act button:disabled { opacity: .5; cursor: default; }
 @media (max-width: 699px) { .pe-row { grid-template-columns: 1fr 1fr; } .pe-row label:last-child { grid-column: 1 / -1; } }
 
+/* 用量 tab（usage.json）：手机竖屏优先；宽屏时排在三栏下方 */
+.usage { padding-top: var(--s4); margin-top: var(--s4); border-top: 1px solid var(--line-strong); flex: none; }
+.usage [hidden] { display: none; }
+.u-fresh { font: 400 var(--fs-12)/1.4 var(--sans); color: var(--text-3); white-space: nowrap; }
+.u-fresh.stale { color: var(--stale); border: 1px solid var(--stale); border-radius: 2px; padding: 0 var(--s1); }
+.u-today { padding: var(--s2) 0 var(--s3); border-bottom: 1px solid var(--line); }
+.u-big b { font: 700 var(--fs-40)/1.1 var(--sans); }
+.u-big span { font-size: var(--fs-15); color: var(--text-2); }
+.u-split { font-size: var(--fs-13); color: var(--text-2); margin-top: var(--s1); }
+.u-quota { font-size: var(--fs-13); margin-top: var(--s1); }
+.u-bars { display: grid; grid-template-columns: repeat(7, 1fr); gap: var(--s1); align-items: end; height: 160px; padding-top: var(--s2); }
+.u-col { display: flex; flex-direction: column; align-items: stretch; justify-content: flex-end; height: 100%; background: none; border: 0; border-bottom: 2px solid transparent; padding: 0; cursor: pointer; min-width: 0; }
+.u-col.sel { border-bottom-color: var(--text); }
+.u-stack { flex: 1; display: flex; flex-direction: column-reverse; justify-content: flex-start; min-height: 0; }
+.u-stack i { display: block; width: 100%; min-height: 1px; }
+.u-v, .u-d { font: var(--fs-12)/1.4 var(--mono); color: var(--text-3); text-align: center; white-space: nowrap; overflow: hidden; }
+.u-col.sel .u-d, .u-col.sel .u-v { color: var(--text); }
+.u-s-worker { background: var(--jade); }
+.u-s-hermes_cron_heartbeat { background: var(--zhu); }
+.u-s-hermes_cron_other { background: var(--amber); }
+.u-s-hermes_main { background: #6C8EBF; }
+.u-s-hermes_local { background: var(--stale); }
+.u-legend { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); font-size: var(--fs-12); color: var(--text-3); padding: var(--s2) 0; }
+.u-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: var(--s1); vertical-align: -1px; }
+.u-model { padding: var(--s1) 0; border-bottom: 1px solid var(--line); font-size: var(--fs-13); }
+.u-model .n { display: flex; justify-content: space-between; gap: var(--s2); }
+.u-model .v { font: var(--fs-12) var(--mono); color: var(--text-2); white-space: nowrap; }
+.u-model .bar i { background: var(--text-2); }
+.usage .row.wide { grid-template-columns: minmax(7em, 13em) 1fr auto; }
+.usage .row .t { color: var(--text-2); font-size: var(--fs-13); }
+
 /* 宽屏：一屏放下，不无限滚动（各栏已封顶；极矮窗口时栏内兜底滚动） */
 @media (min-width: 1100px) {
   .page { min-height: 100dvh; display: flex; flex-direction: column; }   /* min-height：到期栏 + 过期待处理较长时页面整体变高、页脚跟在内容后，不盖住最后一行 */
@@ -239,6 +270,9 @@ dialog p { margin-top: var(--s2); }
   body[data-tab=today] [data-panel]:not([data-panel=today]),
   body[data-tab=folders] [data-panel]:not([data-panel=folders]),
   body[data-tab=projects] [data-panel]:not([data-panel=projects]),
-  body[data-tab=reading] [data-panel]:not([data-panel=reading]) { display: none; }
+  body[data-tab=reading] [data-panel]:not([data-panel=reading]),
+  body[data-tab=usage] [data-panel]:not([data-panel=usage]) { display: none; }
+  .usage { margin-top: 0; border-top: 0; }
+  .usage .row.wide { grid-template-columns: minmax(6em, 10.5em) 1fr auto; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
