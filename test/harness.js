@@ -20,7 +20,7 @@ function fakeEl(tag = 'div') {
   return el;
 }
 
-function load({ token = 't0ken', fetch } = {}) {
+function load({ token = 't0ken', fetch, search = '' } = {}) {
   const els = new Map();
   const document = {
     getElementById(id) { if (!els.has(id)) els.set(id, fakeEl()); return els.get(id); },
@@ -32,7 +32,7 @@ function load({ token = 't0ken', fetch } = {}) {
   const store = { 'zhupi.token': token };
   const ctx = {
     document, Node, console, URLSearchParams, TextEncoder, TextDecoder, atob, btoa, crypto, setTimeout, clearTimeout,
-    location: { search: '', pathname: '/', href: '' },
+    location: { search, pathname: '/', href: '' },
     history: { replaceState() {} },
     localStorage: { getItem: (k) => store[k] ?? null, setItem: (k, v) => { store[k] = v; } },
     matchMedia: () => ({ matches: false }),

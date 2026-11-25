@@ -187,6 +187,13 @@ def normalized(home, status):
     return json.dumps([h, st], sort_keys=True, ensure_ascii=False)
 
 
+def usage_normalized(u):
+    """usage.json 去掉 generated 后比较：只有时间戳变不算内容变。"""
+    if not isinstance(u, dict):
+        return None
+    return json.dumps({k: v for k, v in u.items() if k != "generated"}, sort_keys=True, ensure_ascii=False)
+
+
 def committed(path):
     r = git("show", f"HEAD:{path}", check=False)
     return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip() else None
@@ -211,7 +218,7 @@ def main():
     status = read_json(os.path.join(CACHE_DIR, "status.json"), {}) or {}
     with data_lock():
         sync_down()
-        snaps = {s: read_json(snapshot_path(s)) for s in ("menxia", "dashboard", "countdown", "backlog", "gtasks")}
+        snaps = {s: read_json(snapshot_path(s)) for s in ("menxia", "dashboard", "countdown", "backlog", "gtasks", "usage")}
         old_home, old_status = committed("home.json"), committed("status.json")
         readings, readings_err = [], ""
         try:
@@ -258,6 +265,10 @@ def main():
             todos["failed"] = failed_todos(load_todo_actions())   # 最近 24 h 勾完成没成功的（不含标题）
             home["todos"] = todos
         changed = old_home is None or normalized(home, status) != normalized(old_home, old_status)
+        # 用量看板（collect_usage → snapshot-usage）：单独一个 usage.json，免得 home.json 变大；没采过就不写
+        usage = (snaps.get("usage") or {}).get("data")
+        usage_changed = usage is not None and usage_normalized(usage) != usage_normalized(committed("usage.json"))
+        changed = changed or usage_changed
         stale = True
         if old_home and old_home.get("generated"):
             gen = dt.datetime.fromisoformat(old_home["generated"].replace("Z", "+00:00"))
@@ -267,8 +278,12 @@ def main():
             return 0 if not readings_err else 3
         write_json(os.path.join(DATA_DIR, "home.json"), home)
         write_json(os.path.join(DATA_DIR, "status.json"), status)
+        paths = ["home.json", "status.json"]
+        if usage is not None:
+            write_json(os.path.join(DATA_DIR, "usage.json"), usage)
+            paths.append("usage.json")
         msg = "home: update" if changed else "home: heartbeat"
-        pushed = commit_and_push(["home.json", "status.json"], msg)
+        pushed = commit_and_push(paths, msg)
         log(f"build: {msg} pushed={pushed}")
     return 0 if not readings_err else 3
 

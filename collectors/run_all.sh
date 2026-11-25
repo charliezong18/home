@@ -26,6 +26,7 @@ run_source dashboard collect_dashboard.py
 run_source countdown collect_countdown.py
 run_source backlog collect_backlog.py
 run_source gtasks collect_gtasks.py
+run_source usage collect_usage.py
 
 out="$("$PY" "$DIR/build_home.py" 2>&1)"; rc=$?
 echo "$out"
