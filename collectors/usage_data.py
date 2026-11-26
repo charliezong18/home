@@ -118,7 +118,8 @@ def worker_rows(dispatch=DISPATCH, since=None, ledger=None):
             exit_code = int(exit_txt) if exit_txt not in (None, "") else None
         except ValueError:
             exit_code = None
-        common = {"day": day, "source": "worker", "task_id": stem, "template": meta.get("template"),
+        sid = j.get("session_id") if isinstance(j.get("session_id"), str) else None
+        common = {"day": day, "source": "worker", "task_id": stem, "template": meta.get("template"), "session_id": sid,
                   "subtype": j.get("subtype"), "billing": _read_text(os.path.join(dispatch, "runs", stem + ".billing")) or "plan"}
         first = {"turns": int(_num(j.get("num_turns"))), "denials": len(j.get("permission_denials") or []), "exit_code": exit_code}
         zero = {"turns": 0, "denials": 0, "exit_code": None}

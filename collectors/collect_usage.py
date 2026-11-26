@@ -3,8 +3,8 @@
 
 正常模式：存快照 snapshot-usage.json（CACHE_DIR），build_home 把它写成 home-data 分支的 usage.json 一起提交推送。
 --dry-run：只打印到 stdout，不写任何文件。
-浪费规则（MVP）：R-CRON-IDLE、R-RESUME-HEAVY、R-MAXTURNS、R-DENY。
-TODO(P2b)：R-REFETCH / R-REREAD（要读 transcript jsonl 的 tool_use，只取 url/path 计数）。
+浪费规则：R-CRON-IDLE、R-RESUME-HEAVY、R-MAXTURNS、R-DENY；
+R-REFETCH（同任务同 URL ≥2 次）、R-REREAD（同任务同文件整读 ≥3 次）读 worker transcript 的 tool_use（usage_transcripts.py，只取 url/path 计数）。
 输出只有数字、日期、模型名和 task id，不含任何 prompt / 正文 / 会话标题。
 """
 import argparse
@@ -14,6 +14,7 @@ import sys
 from collections import defaultdict
 
 import usage_data
+import usage_transcripts
 
 DAYS = 30
 TOP_N = 10
@@ -35,7 +36,7 @@ def task_prefix(tid):
     return tid.split("-", 1)[0]
 
 
-def day_summary(date, rows):
+def day_summary(date, rows, scan=None):
     tot_cost = sum(r["cost_usd"] for r in rows)
     tot_tok = sum(r["tokens"] for r in rows)
     worker = [r for r in rows if r["source"] == "worker"]
@@ -65,7 +66,7 @@ def day_summary(date, rows):
     for r in worker:
         t = tasks.setdefault(r["task_id"], {"task_id": r["task_id"], "model": r["model"], "cost_usd": 0.0, "turns": 0, "denials": 0,
                                             "template": r.get("template"), "subtype": r.get("subtype"), "exit_code": None,
-                                            "cache_create": 0, "billing": r.get("billing")})
+                                            "cache_create": 0, "billing": r.get("billing"), "session_id": r.get("session_id")})
         t["cost_usd"] += r["cost_usd"]
         t["turns"] += r["turns"]
         t["denials"] += r["denials"]
@@ -92,13 +93,13 @@ def day_summary(date, rows):
         "failures": {"error_max_turns": len(maxturns), "permission_denials": sum(t["denials"] for t in tl),
                      "exit_nonzero": len(exit_bad), "ids": failed_ids},
         "top_tasks": top,
-        "waste": waste(rows, tl),
+        "waste": waste(rows, tl, scan),
         "billing_api_runs": sum(1 for t in tl if t["billing"] == "api"),
     }
 
 
-def waste(rows, tasks):
-    """当天命中的浪费规则；count=0 的不列。"""
+def waste(rows, tasks, scan=None):
+    """当天命中的浪费规则；count=0 的不列。scan(task) → {"refetch": n, "reread": n} | None（读 transcript；None 表示不跑这两条）。"""
     out = []
     idle = [r for r in rows if r["source"] == "hermes_cron_heartbeat" and r.get("idle")]
     if idle:
@@ -115,7 +116,19 @@ def waste(rows, tasks):
     if dn:
         out.append({"rule": "R-DENY", "count": sum(t["denials"] for t in dn), "cost_usd": _r(sum(t["cost_usd"] for t in dn)),
                     "ids": [t["task_id"] for t in dn[:5]]})
-    # TODO(P2b): R-REFETCH（同会话同 URL ≥2 次）、R-REREAD（同会话同 path ≥2 次且 >100KB）
+    if scan:
+        hits = {"R-REFETCH": [], "R-REREAD": []}
+        for t in tasks:
+            s = scan(t)
+            if not s:
+                continue
+            if s.get("refetch"):
+                hits["R-REFETCH"].append((t, s["refetch"]))
+            if s.get("reread"):
+                hits["R-REREAD"].append((t, s["reread"]))
+        for rule, hs in hits.items():
+            if hs:    # count = 多余的重复次数；没有 cost_usd（重复调用的成本无法从 run 总成本里拆出）
+                out.append({"rule": rule, "count": sum(n for _, n in hs), "ids": [t["task_id"] for t, _ in hs[:5]]})
     return out
 
 
@@ -132,13 +145,13 @@ def week_summary(days_by_date, today):
             "vs_last_week_pct": round((cost(this) - lc) / lc * 100) if lc else None, "fable_cost_usd": _r(fable)}
 
 
-def build(rows, today, now=None, days=DAYS):
+def build(rows, today, now=None, days=DAYS, scan=None):
     now = now or dt.datetime.now(usage_data.TZ)
     by_day = defaultdict(list)
     for r in rows:
         by_day[r["day"]].append(r)
     dates = [(today - dt.timedelta(days=i)).isoformat() for i in range(days)]
-    day_objs = [day_summary(d, by_day.get(d, [])) for d in dates]   # 新的在前
+    day_objs = [day_summary(d, by_day.get(d, []), scan) for d in dates]   # 新的在前
     return {
         "schema": 1,
         "generated": now.replace(microsecond=0).isoformat(),
@@ -157,7 +170,7 @@ def main(argv=None):
     now = dt.datetime.now(usage_data.TZ)
     today = now.date()
     since = (today - dt.timedelta(days=DAYS - 1)).isoformat()
-    usage = build(usage_data.load_rows(since, today.isoformat()), today, now)
+    usage = build(usage_data.load_rows(since, today.isoformat()), today, now, scan=usage_transcripts.scan_task)
     if a.dry_run:
         out = usage
         if a.day:

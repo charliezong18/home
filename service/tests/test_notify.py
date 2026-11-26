@@ -86,7 +86,7 @@ class NotifyTest(unittest.TestCase):
         pat = re.compile(r"ntfy\.sh/[A-Za-z0-9_-]{3,}")
         hits = []
         for root, dirs, files in os.walk(REPO):
-            dirs[:] = [d for d in dirs if d not in (".git", ".venv", ".scratch", "__pycache__")]
+            dirs[:] = [d for d in dirs if d not in (".git", ".venv", ".scratch", ".worktrees", "__pycache__")]
             for name in files:
                 p = os.path.join(root, name)
                 if p == os.path.abspath(__file__):

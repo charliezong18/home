@@ -269,7 +269,7 @@ function renderUsage(u, err) {
     h('span', { class: 'k' }, String(w.rule || '')),
     h('span', { class: 't' }, `${WASTE_LABEL[w.rule] || ''} · ${w.count ?? 0} 次${Array.isArray(w.ids) && w.ids.length ? ` · ${w.ids.slice(0, 3).join(', ')}` : ''}`),
     h('span', { class: 'v' }, w.cost_usd != null ? usd(w.cost_usd) : '—'))) : [empty('这天没有命中浪费规则。')]),
-  h('p', { class: 'more muted' }, 'R-REFETCH / R-REREAD（重复抓网页 / 重读大文件）待接入。'));
+  h('p', { class: 'more muted' }, 'R-REFETCH / R-REREAD 的次数 = 同任务内多余的重复次数（网页 ≥2 次、整读文件 ≥3 次），不含金额。'));
 
   // 失败 / 拒绝
   const f = d.failures || {};
@@ -299,7 +299,7 @@ function demoUsage() {
       turns: 900,
       failures: { error_max_turns: 1, permission_denials: 4, exit_nonzero: 0, ids: [{ task_id: 'demo-max-turns', kind: 'error_max_turns' }, { task_id: 'demo-denied', kind: 'permission_denials', count: 4 }] },
       top_tasks: [...Array(10)].map((__, k) => ({ task_id: `demo-task-${k + 1}`, model: k < 3 ? 'fable-5-1' : 'opus-5-5', cost_usd: 6 - k * 0.5, turns: 30 + k, denials: k === 1 ? 4 : 0, template: 'build', subtype: k === 2 ? 'error_max_turns' : 'success' })),
-      waste: [{ rule: 'R-CRON-IDLE', count: 43, cost_usd: hb - 2 }, { rule: 'R-RESUME-HEAVY', count: 1, cost_usd: 4.2, ids: ['demo-task-4'] }, { rule: 'R-DENY', count: 4, cost_usd: 5.5, ids: ['demo-denied'] }],
+      waste: [{ rule: 'R-CRON-IDLE', count: 43, cost_usd: hb - 2 }, { rule: 'R-RESUME-HEAVY', count: 1, cost_usd: 4.2, ids: ['demo-task-4'] }, { rule: 'R-REFETCH', count: 9, ids: ['demo-task-2'] }, { rule: 'R-REREAD', count: 11, ids: ['demo-task-4'] }, { rule: 'R-DENY', count: 4, cost_usd: 5.5, ids: ['demo-denied'] }],
       billing_api_runs: 0,
     };
   });
