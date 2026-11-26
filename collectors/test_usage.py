@@ -155,7 +155,7 @@ class UsageDataTest(unittest.TestCase):
         self.assertNotIn("巡检", blob)
         self.assertNotIn("SILENT", blob)
         allowed = {"day", "source", "model", "task_id", "template", "cost_usd", "tokens", "turns", "denials", "subtype",
-                   "exit_code", "billing", "cache_create", "idle"}
+                   "exit_code", "billing", "cache_create", "idle", "session_id"}
         for r in self.rows:
             self.assertLessEqual(set(r), allowed)
 

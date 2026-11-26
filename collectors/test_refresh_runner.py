@@ -1,11 +1,94 @@
 """门下「更新」单（kind=refresh，服务 D-19）：入账、幂等、running→done 需要新版本证据、failed、与画可单共享并发、日上限分开。"""
+import contextlib
+import inspect
 import json
 import os
-
-import pytest
+import re
+import sys
+import tempfile
+import unittest
+from pathlib import Path
 
 import approval_runner as R
 import approvals as A
+
+
+# ---- 不依赖 pytest 的最小替身：保留下面 pytest 风格的用例写法，由 load_tests 交给 unittest 跑（make test 用 unittest discover）。
+# 只实现这个文件用到的部分：fixture / mark.parametrize / raises(match=) / tmp_path / monkeypatch。
+class _MonkeyPatch:
+    def __init__(self):
+        self._undo = []
+
+    def setattr(self, obj, name, value):
+        self._undo.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    def undo(self):
+        for obj, name, old in reversed(self._undo):
+            setattr(obj, name, old)
+
+
+class _Raises(contextlib.AbstractContextManager):
+    def __init__(self, exc, match=None):
+        self.exc, self.match = exc, match
+
+    def __exit__(self, et, ev, tb):
+        if et is None:
+            raise AssertionError(f"没有抛出 {self.exc.__name__}")
+        if not issubclass(et, self.exc):
+            return False
+        if self.match and not re.search(self.match, str(ev)):
+            raise AssertionError(f"异常信息 {str(ev)!r} 不匹配 {self.match!r}")
+        return True
+
+
+class pytest:  # noqa: N801 — 与原 pytest 调用点同名，改动最小
+    @staticmethod
+    def fixture(fn):
+        fn._is_fixture = True
+        return fn
+
+    class mark:
+        @staticmethod
+        def parametrize(name, values):
+            def deco(fn):
+                fn._params = (name, list(values))
+                return fn
+            return deco
+
+    raises = _Raises
+
+
+def load_tests(loader, tests, pattern):
+    suite = unittest.TestSuite()
+    g = sys.modules[__name__].__dict__
+    fixtures = {k: v for k, v in g.items() if getattr(v, "_is_fixture", False)}
+
+    def make(fn, extra, label):
+        def run():
+            with tempfile.TemporaryDirectory(prefix="refresh-runner-") as tmp:
+                mp = _MonkeyPatch()
+                try:
+                    avail = {"tmp_path": Path(tmp), "monkeypatch": mp, **extra}
+
+                    def resolve(f):
+                        return {p: avail[p] if p in avail else fixtures[p](**resolve(fixtures[p]))
+                                for p in inspect.signature(f).parameters}
+                    fn(**resolve(fn))
+                finally:
+                    mp.undo()
+        return unittest.FunctionTestCase(run, description=label)
+
+    for name, fn in sorted(g.items()):
+        if not (name.startswith("test_") and callable(fn)):
+            continue
+        if hasattr(fn, "_params"):
+            pname, values = fn._params
+            for v in values:
+                suite.addTest(make(fn, {pname: v}, f"{name}[{v!r}]"))
+        else:
+            suite.addTest(make(fn, {}, name))
+    return suite
 
 RID, REQ = "rv_01REFRESHTEST000000000000", "rfr_01REFRESHTEST00000000000"
 SINCE = "2026-01-01T00:00:00+00:00"

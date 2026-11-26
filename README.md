@@ -308,7 +308,7 @@ Phase 2（Backlog / 倒数日 / 日历 / 账单快递，账单不存金额）同
   heartbeat = cron 会话标题含「巡检」或以 jobs.json 里 `e8319478c051` 的 name 开头；标题判断与 `[SILENT]` 判断都在 SQL 里做，正文不进 Python。
   telegram/desktop 长会话按当天 assistant 消息数占比摊总成本（近似）。`python3 collectors/usage_data.py --day 2026-11-23`
 - `collectors/collect_usage.py`（P2）：rows → `usage.json`（30 天滚动，新的在前；schema 同设计稿 §3.2，另有 `failures.ids`、`waste[].ids`）。
-  规则：R-CRON-IDLE（巡检回 [SILENT]）、R-RESUME-HEAVY（单任务新写缓存 ≥200k 且回合 ≤10）、R-MAXTURNS、R-DENY；R-REFETCH / R-REREAD 待做。
+  规则：R-CRON-IDLE（巡检回 [SILENT]）、R-RESUME-HEAVY（单任务新写缓存 ≥200k 且回合 ≤10）、R-MAXTURNS、R-DENY；R-REFETCH（同任务同 URL 抓取 ≥2 次）、R-REREAD（同任务同文件整读 ≥3 次，带 offset/limit 的分段读不算）。后两条由 `usage_transcripts.py` 按 runs/*.json 的 session_id 到 `~/.claude/projects/*/<session_id>.jsonl` 里只读 tool_use 的工具名与 url/file_path 计数（不读正文、不输出 url/path；找不到 transcript 就跳过），count = 多余的重复次数，无 cost_usd。宽屏（≥900px）用量区分两列：左今日卡 + 7 天柱，右模型 / Top10 / 浪费 / 失败。
   `quota` 恒为 `source: "none"`（页面显示「额度待标定」）。`--dry-run [--day D]` 只打印。
 - 接入：`run_all.sh` / `service/dibao_sched.py` 多一个源 `usage` → 存 `snapshot-usage.json`；`build_home.py` 把它写成 home-data 的 `usage.json`
   一起提交（去掉 `generated` 后不变就不算内容变）；`usage.json merge=ours`。
